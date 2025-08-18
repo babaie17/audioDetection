@@ -159,11 +159,22 @@
       form.append('audio', audioBlob, 'clip.webm');
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-
+      // form.append('debug','1'); // uncomment if you want raw upstream echoed back
+    
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'Transcription failed');
-      return data; // { provider, candidates: [ ... ] }
+    
+      const ct = r.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await r.json();
+        if (!r.ok) {
+          const msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error || data);
+          throw new Error(msg);
+        }
+        return data;
+      } else {
+        const text = await r.text();
+        throw new Error(text || `HTTP ${r.status}`);
+      }
     }
 
     micBtn.addEventListener('click', async () => {
