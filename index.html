@@ -33,7 +33,6 @@
     <div class="row">
       <label for="lang">Language:</label>
       <select id="lang">
-        <!-- You can add more BCP-47 codes here -->
         <option value="en-US" selected>English (United States)</option>
         <option value="zh-CN">中文（普通话，中国）</option>
         <option value="zh-TW">中文（國語，台灣）</option>
@@ -82,15 +81,12 @@
     const listEl = document.getElementById('list');
     const provInfo = document.getElementById('provInfo');
 
-    let mediaRecorder = null;
-    let chunks = [];
     let recording = false;
 
     function setStatus(msg, isError=false) {
       statusEl.textContent = msg;
       statusEl.className = 'status' + (isError ? ' error' : '');
     }
-
     function setRecording(on) {
       recording = on;
       micBtn.classList.toggle('recording', on);
@@ -98,50 +94,12 @@
       micLabel.textContent = on ? 'Stop Recording' : 'Start Recording';
       provInfo.textContent = `Using: ${providerSel.value.toUpperCase()}`;
     }
-
-    async function startRecording() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      chunks = [];
-    
-      // Prefer OGG/Opus (Azure-friendly); fallback to WebM/Opus
-      let mime = '';
-      if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-        mime = 'audio/ogg;codecs=opus';
-      } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mime = 'audio/webm;codecs=opus';
-      } else {
-        // last resort: let the browser pick a default
-        mime = '';
-      }
-    
-      mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-      chunks = [];
-      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-      mediaRecorder.onstart = () => setStatus('Listening…');
-      mediaRecorder.start();
-    }
-
-    function stopRecording() {
-      return new Promise(resolve => {
-        if (!mediaRecorder) return resolve(null);
-        mediaRecorder.onstop = () => {
-          const type = chunks[0]?.type || 'application/octet-stream';
-          const blob = new Blob(chunks, { type });
-          resolve(blob);
-        };
-        mediaRecorder.stop();
-      });
-    }
-
     function renderCandidates(arr) {
-      // Normalize: allow undefined/null/non-arrays
       const clean = Array.isArray(arr)
         ? arr.map(s => (s || '').trim()).filter(Boolean).slice(0, 5)
         : [];
-    
       listEl.innerHTML = '';
       resultsBox.hidden = false;
-    
       if (clean.length === 0) {
         const div = document.createElement('div');
         div.className = 'item';
@@ -149,7 +107,6 @@
         listEl.appendChild(div);
         return;
       }
-    
       clean.forEach((t, i) => {
         const div = document.createElement('div');
         div.className = 'item';
@@ -157,14 +114,73 @@
         listEl.appendChild(div);
       });
     }
-    
+
+    // ---- WAV recorder (16k mono) ----
+    const WAV = { ctx:null, stream:null, source:null, processor:null, buffers:[], sampleRate:16000, recording:false };
+    async function startWavRecording() {
+      WAV.stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      WAV.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: WAV.sampleRate });
+      WAV.source = WAV.ctx.createMediaStreamSource(WAV.stream);
+      WAV.processor = WAV.ctx.createScriptProcessor(4096, 1, 1);
+      WAV.buffers = [];
+      WAV.processor.onaudioprocess = (e) => {
+        WAV.buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+      WAV.source.connect(WAV.processor);
+      WAV.processor.connect(WAV.ctx.destination);
+      WAV.recording = true;
+    }
+    function stopWavRecording() {
+      return new Promise(resolve => {
+        if (!WAV.recording) return resolve(null);
+        WAV.recording = false;
+        try { WAV.processor.disconnect(); } catch {}
+        try { WAV.source.disconnect(); } catch {}
+        try { WAV.stream.getTracks().forEach(t => t.stop()); } catch {}
+
+        // merge Float32 buffers
+        const totalLen = WAV.buffers.reduce((a,c)=>a+c.length, 0);
+        const data = new Float32Array(totalLen);
+        let off = 0; for (const b of WAV.buffers) { data.set(b, off); off += b.length; }
+
+        // Float32 -> Int16 PCM
+        const pcm = new Int16Array(data.length);
+        for (let i=0;i<data.length;i++) {
+          const s = Math.max(-1, Math.min(1, data[i]));
+          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+
+        // Build WAV header
+        const numChannels = 1, bitsPerSample = 16, sampleRate = WAV.sampleRate;
+        const byteRate = sampleRate * numChannels * (bitsPerSample/8);
+        const blockAlign = numChannels * (bitsPerSample/8);
+        const dataSize = pcm.byteLength;
+
+        const buf = new ArrayBuffer(44 + dataSize);
+        const dv = new DataView(buf);
+        let p = 0;
+        writeStr('RIFF'); u32(36 + dataSize); writeStr('WAVE'); writeStr('fmt '); u32(16);
+        u16(1); // PCM
+        u16(numChannels); u32(sampleRate); u32(byteRate); u16(blockAlign); u16(bitsPerSample);
+        writeStr('data'); u32(dataSize);
+        new Uint8Array(buf, 44).set(new Uint8Array(pcm.buffer));
+
+        function writeStr(s){ for (let i=0;i<s.length;i++) dv.setUint8(p++, s.charCodeAt(i)); }
+        function u16(v){ dv.setUint16(p, v, true); p+=2; }
+        function u32(v){ dv.setUint32(p, v, true); p+=4; }
+
+        const blob = new Blob([buf], { type: 'audio/wav' });
+        resolve(blob);
+      });
+    }
+
     async function sendToServer(audioBlob) {
       const form = new FormData();
-      form.append('audio', audioBlob, audioBlob.type.includes('wav') ? 'speech.wav' : 'clip.ogg');
+      form.append('audio', audioBlob, 'speech.wav');              // WAV blob
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      form.append('debug','1'); // only enable when debugging
-    
+      // form.append('debug','1'); // uncomment for one request to see raw Azure/OpenAI reply
+
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
       const ct = r.headers.get('content-type') || '';
       if (ct.includes('application/json')) {
@@ -173,36 +189,35 @@
           const msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error || data);
           throw new Error(msg);
         }
-        return data; // may be { provider, candidates } or { debug:..., candidates?:[] }
+        return data;
       } else {
         const text = await r.text();
         throw new Error(text || `HTTP ${r.status}`);
       }
     }
-    
+
     micBtn.addEventListener('click', async () => {
       try {
         if (!recording) {
-          await startRecording();   // or startWav() if you switched to WAV
+          await startWavRecording();
           setRecording(true);
+          setStatus('Listening…');
         } else {
           setStatus('Processing…');
-          const blob = await stopRecording();  // or stopWav()
+          const blob = await stopWavRecording();
           setRecording(false);
           if (!blob) { setStatus('No audio captured.', true); return; }
-    
+
           const data = await sendToServer(blob);
           console.log('API response:', data);
-    
-          // Always pass a defined array to the renderer
+
           const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
-    
+
           if (data.debug) {
-            // helpful while debugging Azure path
             console.log('DEBUG upstream:', data);
           }
-    
+
           setStatus(`Done. Received ${candidates.length} result(s).`);
         }
       } catch (err) {
