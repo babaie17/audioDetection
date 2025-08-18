@@ -1,9 +1,28 @@
+// api/transcribe.js
+// Vercel Edge Function — no npm deps required.
 export const config = { runtime: 'edge' };
 
 export default async function handler(request) {
   try {
+    // Handle CORS preflight only if you're calling from another origin.
+    // If frontend + backend are on the same Vercel project, you can delete this block.
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type'
+        }
+      });
+    }
+
+    if (request.method !== 'POST') {
+      return json({ error: 'POST only' }, 405);
+    }
+
     const form = await request.formData();
-    const file = form.get('audio');
+    const file = form.get('audio');                 // Blob from MediaRecorder
     const language = (form.get('language') || 'en-US').toString();
     const provider = (form.get('provider') || 'azure').toString().toLowerCase();
 
@@ -11,16 +30,17 @@ export default async function handler(request) {
       return json({ error: 'No audio uploaded' }, 400);
     }
 
-    const buf = Buffer.from(await file.arrayBuffer());
-
+    // -------- OpenAI path (1-best) --------
     if (provider === 'openai') {
       const key = process.env.OPENAI_API_KEY;
       if (!key) return json({ error: 'OPENAI_API_KEY missing' }, 500);
 
       const fd = new FormData();
-      fd.append('file', new Blob([buf], { type: file.type || 'audio/webm' }), 'speech.webm');
+      // Pass the original blob directly; no Buffer needed in Edge runtime.
+      fd.append('file', file, 'speech.webm'); // name is arbitrary; type is taken from Blob
       fd.append('model', 'gpt-4o-transcribe');
-      // Optional: lock language: fd.append('language', language);
+      // Optional: lock language if you want. Whisper usually auto-detects.
+      // fd.append('language', language);
 
       const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
         method: 'POST',
@@ -29,7 +49,6 @@ export default async function handler(request) {
       });
 
       const body = await safeBody(r);
-      console.log('[OPENAI RAW]', body); // TEMP: remove after testing
       if (!r.ok) return json({ error: body?.error || body?.message || 'OpenAI error' }, r.status);
 
       const text = (body?.text || '').trim();
@@ -37,14 +56,17 @@ export default async function handler(request) {
       return json({ provider: 'openai', candidates }, 200);
     }
 
-    // ---- Azure path (Top-5) ----
+    // -------- Azure path (Top-5 via format=detailed) --------
     const azKey = process.env.AZURE_SPEECH_KEY;
     const azRegion = process.env.AZURE_REGION || 'eastus';
     if (!azKey) return json({ error: 'AZURE_SPEECH_KEY missing' }, 500);
 
-    // conversation endpoint; 'format=detailed' requests NBest
+    // REST "conversation" short-audio endpoint (<= 60s).
+    // 'format=detailed' requests NBest hypotheses.
     const url = `https://${azRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(language)}&format=detailed`;
 
+    // IMPORTANT: send the blob as-is and set Content-Type to the blob's type.
+    // Prefer OGG/Opus on the frontend; otherwise WebM/Opus also works in many regions.
     const r = await fetch(url, {
       method: 'POST',
       headers: {
@@ -52,20 +74,21 @@ export default async function handler(request) {
         'Content-Type': file.type || 'application/octet-stream',
         'Accept': 'application/json'
       },
-      body: buf
+      body: file
     });
 
     const body = await safeBody(r);
-    console.log('[AZURE RAW]', body); // TEMP: remove after testing
     if (!r.ok) return json({ error: body?.error || body?.Message || 'Azure error' }, r.status);
 
-    // Normalize candidates across shapes
-    const candidates = extractAzureCandidates(body).filter(s => s && s.trim().length > 0).slice(0, 5);
+    const candidates = extractAzureCandidates(body)
+      .map(s => (s || '').trim())
+      .filter(s => s.length > 0)
+      .slice(0, 5);
 
-    // Optional fallback: single DisplayText if present
+    // Fallback: some shapes return DisplayText only
     if (candidates.length === 0) {
-      const display = (body?.DisplayText || body?.Display || '').trim();
-      if (display) candidates.push(display);
+      const dt = (body?.DisplayText || body?.Display || '').toString().trim();
+      if (dt) candidates.push(dt);
     }
 
     return json({ provider: 'azure', candidates }, 200);
@@ -75,13 +98,20 @@ export default async function handler(request) {
   }
 }
 
+/* ---------- helpers ---------- */
+
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'Content-Type': 'application/json' }
+    headers: {
+      'Content-Type': 'application/json',
+      // If using a different frontend origin, set a specific allowed origin here.
+      'Access-Control-Allow-Origin': '*'
+    }
   });
 }
 
+// Try JSON first; if not JSON, read text and wrap it so we always return JSON to the client.
 async function safeBody(r) {
   const ct = r.headers.get('content-type') || '';
   if (ct.includes('application/json')) return await r.json();
@@ -89,30 +119,23 @@ async function safeBody(r) {
   return { message: text };
 }
 
-// Azure can return several shapes; collect all plausible text fields
+// Normalize Azure STT result shapes and pull out best textual fields.
 function extractAzureCandidates(data) {
   let nbest = [];
-  if (Array.isArray(data?.NBest)) nbest = data.NBest;
-  else if (Array.isArray(data?.results) && Array.isArray(data.results[0]?.NBest)) nbest = data.results[0].NBest;
-  else if (Array.isArray(data?.RecognitionStatus)) {
-    // unlikely; placeholder for odd shapes
+  if (Array.isArray(data?.NBest)) {
+    nbest = data.NBest;
+  } else if (Array.isArray(data?.results) && Array.isArray(data.results[0]?.NBest)) {
+    nbest = data.results[0].NBest;
   }
 
-  const fields = ['lexical', 'display', 'itn', 'maskedITN', 'transcript', 'NormalizedText', 'Display'];
   const out = [];
+  const fields = ['lexical', 'display', 'itn', 'maskedITN', 'transcript', 'NormalizedText', 'Display'];
 
-  if (Array.isArray(nbest)) {
-    for (const item of nbest) {
-      for (const f of fields) {
-        const v = (item?.[f] || '').toString().trim();
-        if (v) { out.push(v); break; }
-      }
+  for (const item of nbest || []) {
+    for (const f of fields) {
+      const v = (item?.[f] || '').toString().trim();
+      if (v) { out.push(v); break; }
     }
   }
-
-  // Some regions return { DisplayText, RecognitionStatus }
-  const dt = (data?.DisplayText || '').toString().trim();
-  if (dt) out.push(dt);
-
   return out;
 }
