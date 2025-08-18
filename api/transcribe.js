@@ -49,7 +49,7 @@ export default async function handler(request) {
       });
 
       const body = await safeBody(r);
-      if (!r.ok) return json({ error: body?.error || body?.message || 'OpenAI error' }, r.status);
+      if (!r.ok) return json({ error: errString(body, 'OpenAI error') }, r.status);
 
       const text = (body?.text || '').trim();
       const candidates = text ? [text] : [];
@@ -78,7 +78,7 @@ export default async function handler(request) {
     });
 
     const body = await safeBody(r);
-    if (!r.ok) return json({ error: body?.error || body?.Message || 'Azure error' }, r.status);
+    if (!r.ok) return json({ error: errString(body, 'Azure error') }, r.status);
 
     const candidates = extractAzureCandidates(body)
       .map(s => (s || '').trim())
@@ -99,6 +99,14 @@ export default async function handler(request) {
 }
 
 /* ---------- helpers ---------- */
+function errString(body, fallback = 'Unknown error') {
+  if (!body) return fallback;
+  if (typeof body === 'string') return body;
+  // Common OpenAI/Azure shapes:
+  const m = body?.error?.message || body?.message || body?.Message;
+  if (typeof m === 'string') return m;
+  try { return JSON.stringify(body); } catch { return fallback; }
+}
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
@@ -139,3 +147,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
