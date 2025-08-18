@@ -123,14 +123,24 @@
     }
 
     function renderCandidates(arr) {
+      console.log('[ASR candidates]', arr);
+      const clean = (arr || []).map(s => (s || '').trim()).filter(s => s.length > 0).slice(0, 5);
       listEl.innerHTML = '';
-      (arr || []).slice(0, 5).forEach((t, i) => {
+      if (clean.length === 0) {
+        resultsBox.hidden = false;
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.textContent = 'No speech recognized. Try a slightly longer/clearer utterance.';
+        listEl.appendChild(div);
+        return;
+      }
+      clean.forEach((t, i) => {
         const div = document.createElement('div');
         div.className = 'item';
         div.textContent = `${i+1}. ${t}`;
         listEl.appendChild(div);
       });
-      resultsBox.hidden = (arr || []).length === 0;
+      resultsBox.hidden = false;
     }
 
     async function sendToServer(audioBlob) {
