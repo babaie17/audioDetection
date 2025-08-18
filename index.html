@@ -134,35 +134,38 @@
     }
 
     function renderCandidates(arr) {
-      console.log('[ASR candidates]', arr);
-      const clean = (arr || []).map(s => (s || '').trim()).filter(s => s.length > 0).slice(0, 5);
+      // Normalize: allow undefined/null/non-arrays
+      const clean = Array.isArray(arr)
+        ? arr.map(s => (s || '').trim()).filter(Boolean).slice(0, 5)
+        : [];
+    
       listEl.innerHTML = '';
+      resultsBox.hidden = false;
+    
       if (clean.length === 0) {
-        resultsBox.hidden = false;
         const div = document.createElement('div');
         div.className = 'item';
         div.textContent = 'No speech recognized. Try a slightly longer/clearer utterance.';
         listEl.appendChild(div);
         return;
       }
+    
       clean.forEach((t, i) => {
         const div = document.createElement('div');
         div.className = 'item';
         div.textContent = `${i+1}. ${t}`;
         listEl.appendChild(div);
       });
-      resultsBox.hidden = false;
     }
-
+    
     async function sendToServer(audioBlob) {
       const form = new FormData();
-      form.append('audio', audioBlob, 'clip.webm');
+      form.append('audio', audioBlob, audioBlob.type.includes('wav') ? 'speech.wav' : 'clip.ogg');
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      // form.append('debug','1'); // uncomment if you want raw upstream echoed back
+      // form.append('debug','1'); // only enable when debugging
     
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
-    
       const ct = r.headers.get('content-type') || '';
       if (ct.includes('application/json')) {
         const data = await r.json();
@@ -170,26 +173,37 @@
           const msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error || data);
           throw new Error(msg);
         }
-        return data;
+        return data; // may be { provider, candidates } or { debug:..., candidates?:[] }
       } else {
         const text = await r.text();
         throw new Error(text || `HTTP ${r.status}`);
       }
     }
-
+    
     micBtn.addEventListener('click', async () => {
       try {
         if (!recording) {
-          await startRecording();
+          await startRecording();   // or startWav() if you switched to WAV
           setRecording(true);
         } else {
           setStatus('Processing…');
-          const blob = await stopRecording();
+          const blob = await stopRecording();  // or stopWav()
           setRecording(false);
           if (!blob) { setStatus('No audio captured.', true); return; }
-          const { provider, candidates } = await sendToServer(blob);
+    
+          const data = await sendToServer(blob);
+          console.log('API response:', data);
+    
+          // Always pass a defined array to the renderer
+          const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
-          setStatus(`Done. Received ${candidates.length} result(s) from ${provider.toUpperCase()}.`);
+    
+          if (data.debug) {
+            // helpful while debugging Azure path
+            console.log('DEBUG upstream:', data);
+          }
+    
+          setStatus(`Done. Received ${candidates.length} result(s).`);
         }
       } catch (err) {
         console.error(err);
