@@ -57,6 +57,13 @@ export default async function handler(request) {
     }
 
     // -------- Azure path (Top-5 via format=detailed) --------
+    // Right after: const file = form.get('audio')
+    const size = file.size || 0;
+    const type = file.type || '(none)';
+    if (size < 2000) {
+      return json({ error: `Audio too small (${size} bytes). type=${type}` }, 400);
+    }
+    
     const azKey = process.env.AZURE_SPEECH_KEY;
     const azRegion = process.env.AZURE_REGION || 'eastus';
     if (!azKey) return json({ error: 'AZURE_SPEECH_KEY missing' }, 500);
@@ -78,7 +85,8 @@ export default async function handler(request) {
     });
 
     const body = await safeBody(r);
-    if (!r.ok) return json({ error: errString(body, 'Azure error') }, r.status);
+    //if (!r.ok) return json({ error: errString(body, 'Azure error') }, r.status);
+    return json({ debug:true, sent:{size, type, contentType: (file.type||'octet')}, azure:{status:r.status, ok:r.ok, body} }, r.ok ? 200 : r.status);
 
     const candidates = extractAzureCandidates(body)
       .map(s => (s || '').trim())
@@ -147,4 +155,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
