@@ -163,7 +163,7 @@
       form.append('audio', audioBlob, audioBlob.type.includes('wav') ? 'speech.wav' : 'clip.ogg');
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      // form.append('debug','1'); // only enable when debugging
+      form.append('debug','1'); // only enable when debugging
     
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
       const ct = r.headers.get('content-type') || '';
