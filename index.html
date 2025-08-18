@@ -102,11 +102,21 @@
     async function startRecording() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
-      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus' : 'audio/webm';
-      mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
-
-      mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    
+      // Prefer OGG/Opus (Azure-friendly); fallback to WebM/Opus
+      let mime = '';
+      if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        mime = 'audio/ogg;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mime = 'audio/webm;codecs=opus';
+      } else {
+        // last resort: let the browser pick a default
+        mime = '';
+      }
+    
+      mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunks = [];
+      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onstart = () => setStatus('Listening…');
       mediaRecorder.start();
     }
@@ -115,7 +125,8 @@
       return new Promise(resolve => {
         if (!mediaRecorder) return resolve(null);
         mediaRecorder.onstop = () => {
-          const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' });
+          const type = chunks[0]?.type || 'application/octet-stream';
+          const blob = new Blob(chunks, { type });
           resolve(blob);
         };
         mediaRecorder.stop();
