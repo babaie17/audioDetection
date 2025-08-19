@@ -34,7 +34,14 @@ export default async function handler(request) {
       if (!key) return json({ error: 'OPENAI_API_KEY missing', candidates: [] }, 500);
 
       const fd = new FormData();
-      fd.append('file', file, 'speech.webm'); // filename is arbitrary; MIME comes from Blob
+      //fd.append('file', file, 'speech.webm'); // filename is arbitrary; MIME comes from Blob
+
+      const t = (file.type || '');
+      const name =
+        t.includes('wav')  ? 'speech.wav' :
+        t.includes('ogg')  ? 'speech.ogg' :
+        t.includes('webm') ? 'speech.webm' : 'audio.bin';
+      fd.append('file', file, name);
       fd.append('model', 'gpt-4o-transcribe');
       // Optional: lock language
       // fd.append('language', language);
@@ -202,3 +209,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
