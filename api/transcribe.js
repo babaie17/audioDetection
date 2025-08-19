@@ -42,9 +42,9 @@ export default async function handler(request) {
         t.includes('ogg')  ? 'speech.ogg' :
         t.includes('webm') ? 'speech.webm' : 'audio.bin';
       fd.append('file', file, name);
+      // Force language for OpenAI:
+      fd.append('language', toWhisperLang(language));
       fd.append('model', 'gpt-4o-transcribe');
-      // Optional: lock language
-      // fd.append('language', language);
 
       const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
         method: 'POST',
@@ -62,6 +62,9 @@ export default async function handler(request) {
       if (!r.ok) return json({ error: errString(body, 'OpenAI error'), candidates: [] }, r.status);
 
       const text = (body?.text || '').trim();
+      
+      //candidates = strictLanguageFilter(candidates, language);
+      
       return json({ provider: 'openai', candidates: text ? [text] : [] }, 200);
     }
 
@@ -117,7 +120,9 @@ export default async function handler(request) {
         .map(s => (s || '').trim())
         .filter(Boolean)
         .slice(0, 5);
-
+      
+      candidates = strictLanguageFilter(candidates, language);
+      
       if (candidates.length === 0) {
         const dt = (body?.DisplayText || body?.Display || '').toString().trim();
         if (dt) candidates = [dt];
@@ -157,6 +162,32 @@ export default async function handler(request) {
 }
 
 /* ---------- helpers ---------- */
+function looksLikeLatinOnly(s) {
+  // True if string has letters but no CJK/JP/KR scripts
+  const hasLetter = /[A-Za-z]/.test(s);
+  const hasCJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(s);
+  return hasLetter && !hasCJK;
+}
+
+function strictLanguageFilter(cands, bcp47) {
+  const primary = bcp47.split('-')[0].toLowerCase();
+  if (['zh', 'ja', 'ko'].includes(primary)) {
+    // For CJK, drop Latin-only outputs
+    const filtered = cands.filter(t => !looksLikeLatinOnly(t));
+    return filtered.length ? filtered : [];
+  }
+  return cands;
+}
+
+// Map your UI’s BCP-47 to Whisper’s expected ISO-639
+function toWhisperLang(bcp47) {
+  const map = {
+    'zh-CN': 'zh', 'zh-TW': 'zh',
+    'ja-JP': 'ja', 'ko-KR': 'ko',
+    'en-US': 'en', 'es-ES': 'es'
+  };
+  return map[bcp47] || bcp47.split('-')[0]; // fallback: take primary subtag
+}
 
 function corsHeaders() {
   return {
@@ -209,4 +240,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
