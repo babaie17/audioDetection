@@ -1,5 +1,6 @@
 <script>
 // --- pinyin shard loader (client-side) ---
+  
 const shardCache = new Map(); // base syllable -> JSON object
 
 // key: "hao" or "hao3"; files live at /pinyin-index/hao.json
@@ -44,4 +45,5 @@ async function homophonesFromPinyin(syllable) {
   const key = toPinyinKey(syllable);
   return await loadHanziForPinyin(key || '');
 }
+
 </script>
