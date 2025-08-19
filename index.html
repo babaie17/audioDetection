@@ -71,7 +71,7 @@
     </div>
   </div>
 
-  <script>
+    <script>
     const langSel = document.getElementById('lang');
     const providerSel = document.getElementById('provider');
     const statusEl = document.getElementById('status');
@@ -80,9 +80,11 @@
     const resultsBox = document.getElementById('results');
     const listEl = document.getElementById('list');
     const provInfo = document.getElementById('provInfo');
-
+  
     let recording = false;
-
+    let MODE = null;        // 'wav' or 'media'
+    let mediaRecorder = null, chunks = [];
+  
     function setStatus(msg, isError=false) {
       statusEl.textContent = msg;
       statusEl.className = 'status' + (isError ? ' error' : '');
@@ -114,8 +116,8 @@
         listEl.appendChild(div);
       });
     }
-
-    // ---- WAV recorder (16k mono) ----
+  
+    /* ---------- WAV recorder (Azure) ---------- */
     const WAV = { ctx:null, stream:null, source:null, processor:null, buffers:[], sampleRate:16000, recording:false };
     async function startWavRecording() {
       WAV.stream = await navigator.mediaDevices.getUserMedia({ audio:true });
@@ -137,50 +139,88 @@
         try { WAV.processor.disconnect(); } catch {}
         try { WAV.source.disconnect(); } catch {}
         try { WAV.stream.getTracks().forEach(t => t.stop()); } catch {}
-
+  
         // merge Float32 buffers
         const totalLen = WAV.buffers.reduce((a,c)=>a+c.length, 0);
         const data = new Float32Array(totalLen);
         let off = 0; for (const b of WAV.buffers) { data.set(b, off); off += b.length; }
-
+  
         // Float32 -> Int16 PCM
         const pcm = new Int16Array(data.length);
         for (let i=0;i<data.length;i++) {
           const s = Math.max(-1, Math.min(1, data[i]));
           pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
-
+  
         // Build WAV header
         const numChannels = 1, bitsPerSample = 16, sampleRate = WAV.sampleRate;
         const byteRate = sampleRate * numChannels * (bitsPerSample/8);
         const blockAlign = numChannels * (bitsPerSample/8);
         const dataSize = pcm.byteLength;
-
+  
         const buf = new ArrayBuffer(44 + dataSize);
         const dv = new DataView(buf);
         let p = 0;
         writeStr('RIFF'); u32(36 + dataSize); writeStr('WAVE'); writeStr('fmt '); u32(16);
-        u16(1); // PCM
-        u16(numChannels); u32(sampleRate); u32(byteRate); u16(blockAlign); u16(bitsPerSample);
+        u16(1); u16(numChannels); u32(sampleRate); u32(byteRate); u16(blockAlign); u16(bitsPerSample);
         writeStr('data'); u32(dataSize);
         new Uint8Array(buf, 44).set(new Uint8Array(pcm.buffer));
-
+  
         function writeStr(s){ for (let i=0;i<s.length;i++) dv.setUint8(p++, s.charCodeAt(i)); }
         function u16(v){ dv.setUint16(p, v, true); p+=2; }
         function u32(v){ dv.setUint32(p, v, true); p+=4; }
-
+  
         const blob = new Blob([buf], { type: 'audio/wav' });
         resolve(blob);
       });
     }
-
+  
+    /* ---------- MediaRecorder (OpenAI) ---------- */
+    async function startMediaRecording() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      chunks = [];
+  
+      // Prefer WebM/Opus for OpenAI; fallback to OGG/Opus if needed
+      let mime = '';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mime = 'audio/webm;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        mime = 'audio/ogg;codecs=opus';
+      } else {
+        mime = ''; // let browser decide
+      }
+  
+      mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.start();
+    }
+    function stopMediaRecording() {
+      return new Promise(resolve => {
+        if (!mediaRecorder) return resolve(null);
+        mediaRecorder.onstop = () => {
+          const type = chunks[0]?.type || 'application/octet-stream';
+          const blob = new Blob(chunks, { type });
+          // Stop tracks
+          try { mediaRecorder.stream.getTracks().forEach(t => t.stop()); } catch {}
+          resolve(blob);
+        };
+        mediaRecorder.stop();
+      });
+    }
+  
+    /* ---------- Common upload ---------- */
     async function sendToServer(audioBlob) {
+      const ext =
+        audioBlob.type.includes('wav') ? 'wav' :
+        audioBlob.type.includes('webm') ? 'webm' :
+        audioBlob.type.includes('ogg') ? 'ogg' : 'bin';
+  
       const form = new FormData();
-      form.append('audio', audioBlob, 'speech.wav');              // WAV blob
+      form.append('audio', audioBlob, `speech.${ext}`);
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      // form.append('debug','1'); // uncomment for one request to see raw Azure/OpenAI reply
-
+      // form.append('debug','1'); // uncomment for a single request if you want upstream diagnostics
+  
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
       const ct = r.headers.get('content-type') || '';
       if (ct.includes('application/json')) {
@@ -195,29 +235,38 @@
         throw new Error(text || `HTTP ${r.status}`);
       }
     }
-
+  
     micBtn.addEventListener('click', async () => {
       try {
         if (!recording) {
-          await startWavRecording();
+          // Choose recorder by provider
+          if (providerSel.value === 'azure') {
+            MODE = 'wav';
+            await startWavRecording();
+          } else {
+            MODE = 'media';
+            await startMediaRecording();
+          }
           setRecording(true);
           setStatus('Listening…');
         } else {
           setStatus('Processing…');
-          const blob = await stopWavRecording();
+          let blob = null;
+          if (MODE === 'wav') {
+            blob = await stopWavRecording();
+          } else {
+            blob = await stopMediaRecording();
+          }
           setRecording(false);
           if (!blob) { setStatus('No audio captured.', true); return; }
-
+  
           const data = await sendToServer(blob);
           console.log('API response:', data);
-
+  
           const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
-
-          if (data.debug) {
-            console.log('DEBUG upstream:', data);
-          }
-
+  
+          if (data.debug) console.log('DEBUG upstream:', data);
           setStatus(`Done. Received ${candidates.length} result(s).`);
         }
       } catch (err) {
