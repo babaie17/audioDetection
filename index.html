@@ -219,7 +219,7 @@
       form.append('audio', audioBlob, `speech.${ext}`);
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      // form.append('debug','1'); // uncomment for a single request if you want upstream diagnostics
+      form.append('debug','1'); // uncomment for a single request if you want upstream diagnostics
   
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
       const ct = r.headers.get('content-type') || '';
