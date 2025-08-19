@@ -12,7 +12,7 @@ export default async function handler(request) {
     }
 
     const form = await request.formData();
-    const file = form.get('audio');                 // Blob from client
+    const file = form.get('audio'); // Blob from client
     const language = (form.get('language') || 'en-US').toString();
     const provider = (form.get('provider') || 'azure').toString().toLowerCase();
     const debug = (form.get('debug') || '').toString() === '1';
@@ -33,17 +33,15 @@ export default async function handler(request) {
       const key = process.env.OPENAI_API_KEY;
       if (!key) return json({ error: 'OPENAI_API_KEY missing', candidates: [] }, 500);
 
-      const fd = new FormData();
-      //fd.append('file', file, 'speech.webm'); // filename is arbitrary; MIME comes from Blob
-
       const t = (file.type || '');
       const name =
         t.includes('wav')  ? 'speech.wav' :
         t.includes('ogg')  ? 'speech.ogg' :
         t.includes('webm') ? 'speech.webm' : 'audio.bin';
+
+      const fd = new FormData();
       fd.append('file', file, name);
-      // Force language for OpenAI:
-      fd.append('language', toWhisperLang(language));
+      fd.append('language', toWhisperLang(language));   // force language for Whisper
       fd.append('model', 'gpt-4o-transcribe');
 
       const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -53,19 +51,19 @@ export default async function handler(request) {
       });
       const body = await safeBody(r);
 
-      if (debug) {
-        return json(
-          { provider: 'openai', status: r.status, ok: r.ok, upstream: body, candidates: [] },
-          r.ok ? 200 : r.status
-        );
+      if (debug && !r.ok) {
+        return json({ provider: 'openai', status: r.status, ok: r.ok, upstream: body, candidates: [] }, r.status);
       }
       if (!r.ok) return json({ error: errString(body, 'OpenAI error'), candidates: [] }, r.status);
 
       const text = (body?.text || '').trim();
-      
-      //candidates = strictLanguageFilter(candidates, language);
-      
-      return json({ provider: 'openai', candidates: text ? [text] : [] }, 200);
+      let candidates = text ? [text] : [];
+      candidates = strictLanguageFilter(candidates, language);
+
+      // NEW: zh homophone augmentation (single char or single pinyin)
+      const zh = await buildZhHomophones(request, candidates, language);
+
+      return json({ provider: 'openai', candidates, zhAugment: zh }, 200);
     }
 
     // ---------- Azure path (Top-5 via format=detailed) ----------
@@ -105,48 +103,39 @@ export default async function handler(request) {
 
       const body = await safeBody(r);
 
-      // Collect diagnostics if debug enabled
-      if (debug) {
-        attempts.push({ endpoint: path, status: r.status, ok: r.ok, body });
-      }
+      if (debug) attempts.push({ endpoint: path, status: r.status, ok: r.ok, body });
 
-      if (!r.ok) {
-        lastErr = errString(body, 'Azure error');
-        continue; // try next endpoint
-      }
+      if (!r.ok) { lastErr = errString(body, 'Azure error'); continue; }
 
-      // Extract candidates
+      // Extract candidates (NBest) then fallback to DisplayText
       let candidates = extractAzureCandidates(body)
         .map(s => (s || '').trim())
         .filter(Boolean)
         .slice(0, 5);
-      
-      // 1) Filter NBest by target language (drop Latin-only when zh/ja/ko)
+
+      // Drop Latin-only when zh/ja/ko is selected
       candidates = strictLanguageFilter(candidates, language);
-      
-      // 2) If NBest was empty (or got filtered out), try DisplayText fallback…
+
       if (candidates.length === 0) {
         const dt = (body?.DisplayText || body?.Display || '').toString().trim();
-        // …and also enforce strict language on the fallback text
         const fb = dt ? strictLanguageFilter([dt], language) : [];
         if (fb.length > 0) candidates = fb;
       }
-      
+
       if (candidates.length > 0) {
-        // success: return immediately
+        const zh = await buildZhHomophones(request, candidates, language);
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
           contentType,
-          candidates
+          candidates,
+          zhAugment: zh
         }, 200);
       }
-      
-      // No candidates—try next endpoint
+
       lastErr = errString(body, 'No speech recognized');
     }
 
-    // If we got here, all endpoints failed or yielded no text
     if (debug) {
       return json({
         debug: true,
@@ -165,32 +154,143 @@ export default async function handler(request) {
   }
 }
 
-/* ---------- helpers ---------- */
+/* ======================= zh homophones (server-side) ======================= */
+// If language starts with zh and the top candidate is either:
+// - exactly one Han character -> look up its pinyin (ignoring tone) and return all homophones from /pinyin-index/<base>.json
+// - a single pinyin syllable (e.g., "hǎo"/"hao3"/"hao") -> return all chars for that base
+async function buildZhHomophones(request, candidates, bcp47) {
+  try {
+    const primary = (bcp47 || '').split('-')[0].toLowerCase();
+    if (primary !== 'zh') return null;
+
+    const top = (candidates && candidates[0]) ? candidates[0].trim() : '';
+    if (!top) return null;
+
+    const isSingleHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
+    const singlePinyin = detectSinglePinyin(top); // returns normalized pinyin (might include tone num) or null
+
+    // Compute base URL for same-origin fetches
+    const base = new URL(request.url);
+    const origin = `${base.protocol}//${base.host}`;
+
+    // Case A: recognized exactly one Han character
+    if (isSingleHan) {
+      const ch = [...top].find(c => /\p{Script=Han}/u.test(c));
+
+      // Try to get its readings from a map (prefer /public/hanzi_to_pinyin.json)
+      const readings = await lookupHanziReadings(origin, ch); // [{sound,tone,pretty}] or []
+      // Gather all base sounds (ignore tone)
+      const bases = [...new Set(readings.map(r => (r.sound || '').toLowerCase()).filter(Boolean))];
+
+      // If no reading map available, we can’t resolve the base → homophones
+      if (bases.length === 0) return { mode: 'singleChar', input: ch, homophones: [] };
+
+      // Union homophones across all bases (polyphonic chars like “重”)
+      const homophonesSet = new Set();
+      for (const b of bases) {
+        const shard = await loadPinyinShard(origin, b);
+        for (const char of (shard[b] || [])) homophonesSet.add(char);
+      }
+      const homophones = Array.from(homophonesSet);
+
+      return {
+        mode: 'singleChar',
+        input: ch,
+        bases,
+        homophones
+      };
+    }
+
+    // Case B: recognized a single pinyin syllable
+    if (singlePinyin) {
+      const baseKey = singlePinyin.replace(/[1-5]$/,''); // ignore tone for this feature
+      const shard = await loadPinyinShard(origin, baseKey);
+      const homophones = (shard[baseKey] || []).slice();
+      return {
+        mode: 'singlePinyin',
+        input: top,
+        bases: [baseKey],
+        homophones
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Cache (module-scope) for performance across invocations
+let HANZI_MAP = null;              // { "好":[{sound:"hao",tone:3,pretty:"hǎo"}], ... }
+const SHARD_CACHE = new Map();     // "hao" -> { hao:[...], hao1:[...], ... }
+
+async function lookupHanziReadings(origin, ch) {
+  if (!HANZI_MAP) {
+    // Prefer /hanzi_to_pinyin.json in public
+    let url = `${origin}/hanzi_to_pinyin.json`;
+    let r = await fetch(url);
+    if (!r.ok) {
+      // Fallback to /api/data/hanzi_to_pinyin.json if you kept it there
+      url = `${origin}/api/data/hanzi_to_pinyin.json`;
+      r = await fetch(url);
+      if (!r.ok) return [];
+    }
+    HANZI_MAP = await r.json();
+  }
+  return HANZI_MAP[ch] || [];
+}
+
+async function loadPinyinShard(origin, base) {
+  if (SHARD_CACHE.has(base)) return SHARD_CACHE.get(base);
+  const url = `${origin}/pinyin-index/${base}.json`; // served from /public/pinyin-index/
+  const r = await fetch(url);
+  const obj = r.ok ? await r.json() : {};
+  SHARD_CACHE.set(base, obj);
+  return obj;
+}
+
+/* ======================= helpers ======================= */
+
+// Detect a single pinyin syllable like "hao", "hǎo", "hao3"
+function detectSinglePinyin(s) {
+  const toneMap = {
+    'ā':'a1','á':'a2','ǎ':'a3','à':'a4',
+    'ē':'e1','é':'e2','ě':'e3','è':'e4',
+    'ī':'i1','í':'i2','ǐ':'i3','ì':'i4',
+    'ō':'o1','ó':'o2','ǒ':'o3','ò':'o4',
+    'ū':'u1','ú':'u2','ǔ':'u3','ù':'u4',
+    'ǖ':'v1','ǘ':'v2','ǚ':'v3','ǜ':'v4','ü':'v'
+  };
+  let t = (s||'').trim().toLowerCase();
+  if (!t || t.includes(' ')) return null;
+  t = t.replace(/[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]/g, m => toneMap[m] || m);
+  if (!/^[a-z]+[1-5]?$/.test(t)) return null;
+  if (t.length > 6) return null;
+  return t;
+}
+
 function looksLikeLatinOnly(s) {
-  // True if string has letters but no CJK/JP/KR scripts
   const hasLetter = /[A-Za-z]/.test(s);
   const hasCJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(s);
   return hasLetter && !hasCJK;
 }
-
 function strictLanguageFilter(cands, bcp47) {
   const primary = bcp47.split('-')[0].toLowerCase();
   if (['zh', 'ja', 'ko'].includes(primary)) {
-    // For CJK, drop Latin-only outputs
     const filtered = cands.filter(t => !looksLikeLatinOnly(t));
     return filtered.length ? filtered : [];
   }
   return cands;
 }
 
-// Map your UI’s BCP-47 to Whisper’s expected ISO-639
+// Map BCP-47 to Whisper’s expected ISO-639
 function toWhisperLang(bcp47) {
   const map = {
     'zh-CN': 'zh', 'zh-TW': 'zh',
     'ja-JP': 'ja', 'ko-KR': 'ko',
     'en-US': 'en', 'es-ES': 'es'
   };
-  return map[bcp47] || bcp47.split('-')[0]; // fallback: take primary subtag
+  return map[bcp47] || bcp47.split('-')[0];
 }
 
 function corsHeaders() {
@@ -244,6 +344,3 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
-
-
-
