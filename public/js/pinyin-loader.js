@@ -1,4 +1,3 @@
-<script>
 // --- pinyin shard loader (client-side) ---
   
 const shardCache = new Map(); // base syllable -> JSON object
@@ -46,4 +45,3 @@ async function homophonesFromPinyin(syllable) {
   return await loadHanziForPinyin(key || '');
 }
 
-</script>
