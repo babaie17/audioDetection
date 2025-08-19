@@ -121,13 +121,17 @@ export default async function handler(request) {
         .filter(Boolean)
         .slice(0, 5);
       
+      // 1) Filter NBest by target language (drop Latin-only when zh/ja/ko)
       candidates = strictLanguageFilter(candidates, language);
       
+      // 2) If NBest was empty (or got filtered out), try DisplayText fallback…
       if (candidates.length === 0) {
         const dt = (body?.DisplayText || body?.Display || '').toString().trim();
-        if (dt) candidates = [dt];
+        // …and also enforce strict language on the fallback text
+        const fb = dt ? strictLanguageFilter([dt], language) : [];
+        if (fb.length > 0) candidates = fb;
       }
-
+      
       if (candidates.length > 0) {
         // success: return immediately
         return json({
@@ -137,7 +141,7 @@ export default async function handler(request) {
           candidates
         }, 200);
       }
-
+      
       // No candidates—try next endpoint
       lastErr = errString(body, 'No speech recognized');
     }
@@ -240,5 +244,6 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
 
