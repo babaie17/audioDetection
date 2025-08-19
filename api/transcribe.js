@@ -225,19 +225,23 @@ let HANZI_MAP = null;              // { "好":[{sound:"hao",tone:3,pretty:"hǎo"
 const SHARD_CACHE = new Map();     // "hao" -> { hao:[...], hao1:[...], ... }
 
 async function lookupHanziReadings(origin, ch) {
-  if (!HANZI_MAP) {
-    // Prefer /hanzi_to_pinyin.json in public
-    let url = `${origin}/hanzi_to_pinyin.json`;
-    let r = await fetch(url);
-    if (!r.ok) {
-      // Fallback to /api/data/hanzi_to_pinyin.json if you kept it there
-      url = `${origin}/api/data/hanzi_to_pinyin.json`;
-      r = await fetch(url);
-      if (!r.ok) return [];
+  try {
+    if (!HANZI_MAP) {
+      const url = new URL('/hanzi_to_pinyin.json', origin).toString();
+      const r = await fetch(url);
+      if (!r.ok) {
+        // If you pass ?debug=1 from the client, this will bubble up in your response
+        // so you can see exactly which URL failed.
+        console.warn('Failed to load hanzi_to_pinyin.json:', r.status, url);
+        return [];
+      }
+      HANZI_MAP = await r.json();
     }
-    HANZI_MAP = await r.json();
+    return HANZI_MAP[ch] || [];
+  } catch (e) {
+    console.warn('lookupHanziReadings error', e);
+    return [];
   }
-  return HANZI_MAP[ch] || [];
 }
 
 async function loadPinyinShard(origin, base) {
