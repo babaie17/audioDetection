@@ -167,51 +167,30 @@ async function buildZhHomophones(request, candidates, bcp47) {
     if (!top) return null;
 
     const isSingleHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
-    const singlePinyin = detectSinglePinyin(top); // returns normalized pinyin (might include tone num) or null
+    const singlePinyin = detectSinglePinyin(top); // "hao", "hao3", "hǎo" -> normalized or null
 
-    // Compute base URL for same-origin fetches
-    const base = new URL(request.url);
-    const origin = `${base.protocol}//${base.host}`;
+    // IMPORTANT: use the request URL as base
+    const baseUrl = request.url;
 
-    // Case A: recognized exactly one Han character
     if (isSingleHan) {
       const ch = [...top].find(c => /\p{Script=Han}/u.test(c));
-
-      // Try to get its readings from a map (prefer /public/hanzi_to_pinyin.json)
-      const readings = await lookupHanziReadings(origin, ch); // [{sound,tone,pretty}] or []
-      // Gather all base sounds (ignore tone)
+      const readings = await lookupHanziReadings(baseUrl, ch);    // <— changed arg
       const bases = [...new Set(readings.map(r => (r.sound || '').toLowerCase()).filter(Boolean))];
-
-      // If no reading map available, we can’t resolve the base → homophones
       if (bases.length === 0) return { mode: 'singleChar', input: ch, homophones: [] };
 
-      // Union homophones across all bases (polyphonic chars like “重”)
       const homophonesSet = new Set();
       for (const b of bases) {
-        const shard = await loadPinyinShard(origin, b);
+        const shard = await loadPinyinShard(baseUrl, b);          // <— changed arg
         for (const char of (shard[b] || [])) homophonesSet.add(char);
       }
-      const homophones = Array.from(homophonesSet);
-
-      return {
-        mode: 'singleChar',
-        input: ch,
-        bases,
-        homophones
-      };
+      return { mode: 'singleChar', input: ch, bases, homophones: Array.from(homophonesSet) };
     }
 
-    // Case B: recognized a single pinyin syllable
     if (singlePinyin) {
-      const baseKey = singlePinyin.replace(/[1-5]$/,''); // ignore tone for this feature
-      const shard = await loadPinyinShard(origin, baseKey);
+      const baseKey = singlePinyin.replace(/[1-5]$/,'');
+      const shard = await loadPinyinShard(baseUrl, baseKey);      // <— changed arg
       const homophones = (shard[baseKey] || []).slice();
-      return {
-        mode: 'singlePinyin',
-        input: top,
-        bases: [baseKey],
-        homophones
-      };
+      return { mode: 'singlePinyin', input: top, bases: [baseKey], homophones };
     }
 
     return null;
@@ -219,38 +198,49 @@ async function buildZhHomophones(request, candidates, bcp47) {
     return null;
   }
 }
-
 // Cache (module-scope) for performance across invocations
 let HANZI_MAP = null;              // { "好":[{sound:"hao",tone:3,pretty:"hǎo"}], ... }
-const SHARD_CACHE = new Map();     // "hao" -> { hao:[...], hao1:[...], ... }
 
-async function lookupHanziReadings(origin, ch) {
+async function lookupHanziReadings(baseUrl, ch) {
   try {
     if (!HANZI_MAP) {
-      const url = new URL('/hanzi_to_pinyin.json', origin).toString();
+      const url = new URL('/hanzi_to_pinyin.json', baseUrl).toString();
       const r = await fetch(url);
       if (!r.ok) {
-        // If you pass ?debug=1 from the client, this will bubble up in your response
-        // so you can see exactly which URL failed.
-        console.warn('Failed to load hanzi_to_pinyin.json:', r.status, url);
-        return [];
+        // Leave a breadcrumb in the result when debug=1 (added below)
+        HANZI_MAP = { __probe__: { url, status: r.status } };
+      } else {
+        HANZI_MAP = await r.json();
       }
-      HANZI_MAP = await r.json();
     }
+    if (HANZI_MAP.__probe__) return []; // file missing -> no readings
     return HANZI_MAP[ch] || [];
   } catch (e) {
-    console.warn('lookupHanziReadings error', e);
+    HANZI_MAP = { __probe__: { error: String(e) } };
     return [];
   }
 }
 
-async function loadPinyinShard(origin, base) {
+const SHARD_CACHE = new Map();  // "hao" -> { hao:[...], hao1:[...], ... }
+
+async function loadPinyinShard(baseUrl, base) {
   if (SHARD_CACHE.has(base)) return SHARD_CACHE.get(base);
-  const url = `${origin}/pinyin-index/${base}.json`; // served from /public/pinyin-index/
-  const r = await fetch(url);
-  const obj = r.ok ? await r.json() : {};
-  SHARD_CACHE.set(base, obj);
-  return obj;
+  const url = new URL(`/pinyin-index/${base}.json`, baseUrl).toString();
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      const obj = { __probe__: { url, status: r.status } };
+      SHARD_CACHE.set(base, obj);
+      return obj;
+    }
+    const obj = await r.json();
+    SHARD_CACHE.set(base, obj);
+    return obj;
+  } catch (e) {
+    const obj = { __probe__: { url, error: String(e) } };
+    SHARD_CACHE.set(base, obj);
+    return obj;
+  }
 }
 
 /* ======================= helpers ======================= */
@@ -348,3 +338,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
