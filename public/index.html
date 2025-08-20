@@ -81,6 +81,112 @@
     let chunks = [];
     let recording = false;
 
+    // --- WAV recorder for Azure (mono, 16kHz) ---
+    let wavCtx = null, wavSource = null, wavProcessor = null, wavBuffers = [], wavStream = null;
+    
+    async function startWav() {
+      wavStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      wavCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const input = wavCtx.createMediaStreamSource(wavStream);
+    
+      // ScriptProcessor is widely supported; bufferSize 4096 is fine
+      const bufferSize = 4096;
+      wavProcessor = wavCtx.createScriptProcessor(bufferSize, 1, 1);
+      input.connect(wavProcessor);
+      wavProcessor.connect(wavCtx.destination);
+    
+      // collect mono PCM float32 [-1,1]
+      wavBuffers = [];
+      wavProcessor.onaudioprocess = (e) => {
+        const ch0 = e.inputBuffer.getChannelData(0);
+        // copy the chunk so it isn't GC'd
+        wavBuffers.push(new Float32Array(ch0));
+      };
+    }
+    
+    function floatTo16BitPCM(float32) {
+      const out = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return out;
+    }
+    
+    function encodeWavPCM16(monoSamples, sampleRate = 16000) {
+      const numChannels = 1;
+      const bytesPerSample = 2;
+      const blockAlign = numChannels * bytesPerSample;
+      const byteRate = sampleRate * blockAlign;
+      const dataSize = monoSamples.length * bytesPerSample;
+    
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+    
+      let offset = 0;
+      function writeString(s) { for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i)); }
+    
+      // RIFF header
+      writeString('RIFF');
+      view.setUint32(offset, 36 + dataSize, true); offset += 4;
+      writeString('WAVE');
+    
+      // fmt chunk
+      writeString('fmt ');
+      view.setUint32(offset, 16, true); offset += 4;       // PCM chunk size
+      view.setUint16(offset, 1, true);  offset += 2;       // PCM format (1)
+      view.setUint16(offset, numChannels, true); offset += 2;
+      view.setUint32(offset, sampleRate, true); offset += 4;
+      view.setUint32(offset, byteRate, true); offset += 4;
+      view.setUint16(offset, blockAlign, true); offset += 2;
+      view.setUint16(offset, 16, true); offset += 2;       // bits per sample
+    
+      // data chunk
+      writeString('data');
+      view.setUint32(offset, dataSize, true); offset += 4;
+    
+      // PCM samples
+      const pcm16 = floatTo16BitPCM(monoSamples);
+      for (let i = 0; i < pcm16.length; i++, offset += 2) {
+        view.setInt16(offset, pcm16[i], true);
+      }
+    
+      return new Blob([view], { type: 'audio/wav' });
+    }
+    
+    async function stopWav() {
+      try {
+        if (!wavCtx) return null;
+        wavProcessor && wavProcessor.disconnect();
+        wavSource && wavSource.disconnect();
+        wavCtx.close();
+    
+        // concatenate Float32 chunks
+        const totalLen = wavBuffers.reduce((a, b) => a + b.length, 0);
+        const mono = new Float32Array(totalLen);
+        let off = 0;
+        for (const chunk of wavBuffers) { mono.set(chunk, off); off += chunk.length; }
+    
+        // encode as WAV PCM16 mono @16k
+        const wavBlob = encodeWavPCM16(mono, 16000);
+    
+        // cleanup stream
+        if (wavStream) {
+          wavStream.getTracks().forEach(t => t.stop());
+        }
+    
+        // reset locals
+        wavCtx = wavSource = wavProcessor = null;
+        wavBuffers = [];
+        wavStream = null;
+    
+        return wavBlob;
+      } catch (e) {
+        console.warn('stopWav error', e);
+        return null;
+      }
+    }
+    
     function setStatus(msg, isError=false) {
       statusEl.textContent = msg;
       statusEl.style.color = isError ? '#ff9aa4' : 'var(--muted)';
@@ -145,47 +251,48 @@
     }
 
     async function startRecording() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      chunks = [];
-  
-      // Pick container by provider for best Azure compatibility
       const provider = (providerSel.value || '').toLowerCase();
-      let mime = '';
-  
-      if (provider === 'azure') {
-        // Azure: prefer WebM/Opus (widest acceptance across regions)
-        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-          mime = 'audio/webm;codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-          // fallback if WebM isn't available (rare)
-          mime = 'audio/ogg;codecs=opus';
-        } else {
-          mime = ''; // let browser choose
-        }
-      } else {
-        // OpenAI: either works, prefer WebM for consistency
-        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-          mime = 'audio/webm;codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-          mime = 'audio/ogg;codecs=opus';
-        } else {
-          mime = '';
-        }
-      }
-  
-      mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       chunks = [];
+    
+      if (provider === 'azure') {
+        // Use WAV path for Azure
+        await startWav();
+        setStatus('Listening…');
+        return;
+      }
+    
+      // OpenAI (or anything else): use MediaRecorder with Opus
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    
+      let mime = '';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mime = 'audio/webm;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        mime = 'audio/ogg;codecs=opus';
+      }
+    
+      mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onstart = () => setStatus('Listening…');
       mediaRecorder.start();
     }
-
+    
     function stopRecording() {
+      const provider = (providerSel.value || '').toLowerCase();
+    
+      // Azure: finish WAV path
+      if (provider === 'azure') {
+        return stopWav(); // returns a Blob type 'audio/wav'
+      }
+    
+      // OpenAI: finish MediaRecorder path
       return new Promise(resolve => {
         if (!mediaRecorder) return resolve(null);
         mediaRecorder.onstop = () => {
           const type = chunks[0]?.type || 'application/octet-stream';
           const blob = new Blob(chunks, { type });
+          // stop the mic
+          try { mediaRecorder.stream.getTracks().forEach(t => t.stop()); } catch {}
           resolve(blob);
         };
         mediaRecorder.stop();
