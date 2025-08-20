@@ -84,7 +84,54 @@
     let recording = false;
     let MODE = null;        // 'wav' or 'media'
     let mediaRecorder = null, chunks = [];
+
+    // --- helpers to detect a single Hanzi / single pinyin ---
+    function isSingleHanChar(s) {
+      return [...(s||'')].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
+    }
+    function normalizePinyinKey(s) {
+      const toneMap = {'ā':'a1','á':'a2','ǎ':'a3','à':'a4','ē':'e1','é':'e2','ě':'e3','è':'e4','ī':'i1','í':'i2','ǐ':'i3','ì':'i4','ō':'o1','ó':'o2','ǒ':'o3','ò':'o4','ū':'u1','ú':'u2','ǔ':'u3','ù':'u4','ǖ':'v1','ǘ':'v2','ǚ':'v3','ǜ':'v4','ü':'v'};
+      let t = (s||'').trim().toLowerCase();
+      t = t.replace(/[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]/g, m=>toneMap[m]||m);
+      if (!/^[a-z]+[1-5]?$/.test(t) || t.includes(' ') || t.length>6) return null;
+      return t; // "hao" or "hao3"
+    }
   
+    // --- render homophones under your results list ---
+    function renderHomophones(zhAugment) {
+      if (!zhAugment || !Array.isArray(zhAugment.homophones) || zhAugment.homophones.length === 0) return;
+      const { mode, input, bases, homophones } = zhAugment;
+  
+      const box = document.createElement('div');
+      box.className = 'item';
+  
+      const head = document.createElement('div');
+      head.style.marginBottom = '6px';
+      head.style.opacity = '.85';
+      head.textContent = mode === 'singleChar'
+        ? `Homophones for ${input}${bases?.length?` [${bases.join(', ')}]`:''}:`
+        : `Characters for "${input}"${bases?.length?` [${bases.join(', ')}]`:''}:`;
+      box.appendChild(head);
+  
+      const chips = document.createElement('div');
+      chips.style.display = 'flex';
+      chips.style.flexWrap = 'wrap';
+      chips.style.gap = '8px';
+  
+      homophones.slice(0, 64).forEach(ch => {
+        const span = document.createElement('span');
+        span.style.padding = '6px 9px';
+        span.style.border = '1px solid #2a3766';
+        span.style.borderRadius = '8px';
+        span.style.background = '#101735';
+        span.textContent = ch;
+        chips.appendChild(span);
+      });
+  
+      box.appendChild(chips);
+      listEl.appendChild(box);
+    }
+      
     function setStatus(msg, isError=false) {
       statusEl.textContent = msg;
       statusEl.className = 'status' + (isError ? ' error' : '');
@@ -265,7 +312,37 @@
   
           const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
-  
+
+          // 1) Server-provided homophones
+          if (data.zhAugment) {
+            renderHomophones(data.zhAugment);
+          } else {
+            // 2) Client fallback using pinyin-loader.js if available
+            //    (works when server couldn't augment)
+            try {
+              const top = (candidates[0] || '').trim();
+              const langPrimary = (langSel.value||'').split('-')[0];
+              if (langPrimary === 'zh' && top) {
+                // Case A: single Hanzi -> ask loader for its pinyin then homophones
+                if (isSingleHanChar(top) && window.pinyinLoader?.homophonesFromHanzi) {
+                  const homos = await window.pinyinLoader.homophonesFromHanzi(top);
+                  if (homos && homos.length) renderHomophones({ mode:'singleChar', input: top, bases: null, homophones: homos });
+                }
+                // Case B: single pinyin syllable -> list characters directly
+                else {
+                  const key = normalizePinyinKey(top);
+                  if (key && window.pinyinLoader?.homophonesFromPinyin) {
+                    const homos = await window.pinyinLoader.homophonesFromPinyin(key);
+                    if (homos && homos.length) renderHomophones({ mode:'singlePinyin', input: top, bases: [key.replace(/[1-5]$/,'')], homophones: homos });
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('client fallback failed:', e);
+            }
+          }
+
+          
           if (data.debug) console.log('DEBUG upstream:', data);
           setStatus(`Done. Received ${candidates.length} result(s).`);
         }
