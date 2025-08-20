@@ -46,4 +46,10 @@ async function homophonesFromPinyin(syllable) {
   return await loadHanziForPinyin(key || '');
 }
 
+window.pinyinLoader = {
+  homophonesFromPinyin,
+  homophonesFromHanzi
+};
+console.log('pinyin-loader loaded');
+
 
