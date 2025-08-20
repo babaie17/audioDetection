@@ -340,11 +340,33 @@
 
           // Render server homophones if present and non-empty
           let rendered = false;
+          //chinese
           if (data.zhAugment && Array.isArray(data.zhAugment.homophones) && data.zhAugment.homophones.length > 0) {
             renderHomophones(data.zhAugment);
             rendered = true;
           }
-
+          //english
+          if (data.enHomophones && Array.isArray(data.enHomophones.homophones) && data.enHomophones.homophones.length > 0) {
+            const box = document.createElement('div');
+            box.className = 'item';
+            const head = document.createElement('div');
+            head.style.marginBottom = '6px';
+            head.style.opacity = '.85';
+            head.textContent = `English homophones for "${data.enHomophones.input}":`;
+            box.appendChild(head);
+          
+            const chips = document.createElement('div');
+            chips.className = 'chips';
+            data.enHomophones.homophones.slice(0, 64).forEach(w => {
+              const span = document.createElement('span');
+              span.className = 'chip';
+              span.textContent = w;
+              chips.appendChild(span);
+            });
+            box.appendChild(chips);
+            listEl.appendChild(box);
+          }
+          
           // Minimal client fallback (only when Chinese selected and server gave none)
           const langPrimary = (langSel.value||'').split('-')[0];
           const top = (candidates[0] || '').trim();
