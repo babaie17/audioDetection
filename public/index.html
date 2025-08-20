@@ -313,33 +313,40 @@
           const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
 
-          // 1) Server-provided homophones (only if non-empty)
+          // 1) Server-provided homophones (render once if non-empty)
+          let homophonesRendered = false;
           if (data.zhAugment && Array.isArray(data.zhAugment.homophones) && data.zhAugment.homophones.length > 0) {
             renderHomophones(data.zhAugment);
+            homophonesRendered = true;
           }
           
-          // 2) Client fallback using pinyin-loader.js (runs if server gave none)
-          try {
-            const top = (candidates[0] || '').trim();
-            const langPrimary = (langSel.value||'').split('-')[0];
-            if (langPrimary === 'zh' && top) {
-              // Strip common Chinese punctuation from edge cases like "你。"
-              const onlyHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
-              // Case A: single Hanzi -> ask loader for its readings and list homophones
-              if (onlyHan && onlyHan.length === 1 && window.pinyinLoader?.homophonesFromHanzi) {
-                const homos = await window.pinyinLoader.homophonesFromHanzi(onlyHan);
-                if (homos && homos.length) renderHomophones({ mode:'singleChar', input: onlyHan, bases: null, homophones: homos });
-              } else {
-                // Case B: single pinyin syllable -> list characters directly
-                const key = normalizePinyinKey(top);
-                if (key && window.pinyinLoader?.homophonesFromPinyin) {
-                  const homos = await window.pinyinLoader.homophonesFromPinyin(key);
-                  if (homos && homos.length) renderHomophones({ mode:'singlePinyin', input: top, bases: [key.replace(/[1-5]$/,'')], homophones: homos });
+          // 2) Client fallback — only if server gave nothing useful
+          if (!homophonesRendered) {
+            try {
+              const topRaw = (candidates[0] || '').trim();
+              const langPrimary = (langSel.value||'').split('-')[0];
+              if (langPrimary === 'zh' && topRaw) {
+                // Strip CJK punctuation like "。", "，" etc.
+                const top = [...topRaw].filter(ch => /\p{Script=Han}/u.test(ch) || /[a-zA-Zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü1-5]/.test(ch)).join('');
+                if (top) {
+                  // Case A: single Hanzi
+                  const onlyHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
+                  if (onlyHan && onlyHan.length === 1 && window.pinyinLoader?.homophonesFromHanzi) {
+                    const homos = await window.pinyinLoader.homophonesFromHanzi(onlyHan);
+                    if (homos && homos.length) renderHomophones({ mode:'singleChar', input: onlyHan, bases: null, homophones: homos });
+                  } else {
+                    // Case B: single pinyin syllable
+                    const key = normalizePinyinKey(top);
+                    if (key && window.pinyinLoader?.homophonesFromPinyin) {
+                      const homos = await window.pinyinLoader.homophonesFromPinyin(key);
+                      if (homos && homos.length) renderHomophones({ mode:'singlePinyin', input: topRaw, bases: [key.replace(/[1-5]$/,'')], homophones: homos });
+                    }
+                  }
                 }
               }
+            } catch (e) {
+              console.warn('client fallback failed:', e);
             }
-          } catch (e) {
-            console.warn('client fallback failed:', e);
           }
           
           if (data.debug) console.log('DEBUG upstream:', data);
