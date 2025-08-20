@@ -147,16 +147,34 @@
     async function startRecording() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
-
-      // Prefer OGG/Opus → fallback to WebM/Opus → else default
+  
+      // Pick container by provider for best Azure compatibility
+      const provider = (providerSel.value || '').toLowerCase();
       let mime = '';
-      if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-        mime = 'audio/ogg;codecs=opus';
-      } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mime = 'audio/webm;codecs=opus';
+  
+      if (provider === 'azure') {
+        // Azure: prefer WebM/Opus (widest acceptance across regions)
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          mime = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+          // fallback if WebM isn't available (rare)
+          mime = 'audio/ogg;codecs=opus';
+        } else {
+          mime = ''; // let browser choose
+        }
+      } else {
+        // OpenAI: either works, prefer WebM for consistency
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          mime = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+          mime = 'audio/ogg;codecs=opus';
+        } else {
+          mime = '';
+        }
       }
-
+  
       mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunks = [];
       mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onstart = () => setStatus('Listening…');
       mediaRecorder.start();
