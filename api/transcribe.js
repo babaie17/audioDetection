@@ -56,10 +56,10 @@ export default async function handler(request) {
       // Normalize candidates (strip trailing punctuation if single token)
       let candidates = normalizeCandidates([(body?.text || '').trim()]);
 
-      // zh homophones + tone (optional)
+      // zh homophones, en homophones + tone (optional)
       const zh = await buildZhHomophones(request.url, candidates, language);
-
-      return json({ provider: 'openai', candidates, zhAugment: zh }, 200);
+      const en = await buildEnHomophones(candidates, language);
+      return json({ provider: 'openai', candidates, zhAugment: zh, enHomophones: en }, 200);
     }
 
     // ---------- Azure path (Top-5 via format=detailed) ----------
@@ -109,12 +109,14 @@ export default async function handler(request) {
 
       if (candidates.length > 0) {
         const zh = await buildZhHomophones(request.url, candidates, language);
+        const en = await buildEnHomophones(candidates, language);
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
           contentType,
           candidates,
-          zhAugment: zh
+          zhAugment: zh,
+          enHomophones: en
         }, 200);
       }
 
@@ -213,6 +215,32 @@ async function loadPinyinShard(baseUrl, base) {
 }
 
 /* ======================= helpers ======================= */
+
+// --- English homophones via Datamuse ---
+async function buildEnHomophones(candidates, bcp47) {
+  try {
+    const primary = (bcp47 || '').split('-')[0].toLowerCase();
+    if (primary !== 'en') return null;
+
+    const top = (candidates && candidates[0] || '').trim();
+    // single token only (no spaces, hyphens or apostrophes for this simple pass)
+    if (!top || /\s/.test(top)) return null;
+
+    const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(top)}&max=20`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return null;
+
+    const items = await r.json();
+    const homos = (Array.isArray(items) ? items : [])
+      .map(x => (x && x.word ? x.word : '').trim())
+      .filter(w => w && w.toLowerCase() !== top.toLowerCase());
+
+    if (homos.length === 0) return null;
+    return { input: top, homophones: [...new Set(homos)].slice(0, 20) };
+  } catch {
+    return null;
+  }
+}
 
 // Strip trailing punctuation if the string is a single token (no spaces)
 function stripTrailingPunctIfSingle(s) {
@@ -321,3 +349,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
