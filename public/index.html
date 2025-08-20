@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mic → Cloud ASR (Top 5)</title>
+  <title>Cloud Speech Test (minimal)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0b1020; --card:#141a2e; --accent:#7aa2ff; --text:#e8ecff; --muted:#a6b0d6; }
@@ -19,16 +19,15 @@
     .results h3 { margin: 0 0 8px; font-size:15px; color: var(--muted); }
     .list { display:flex; flex-direction:column; gap:8px; }
     .item { background:#121a38; border:1px solid #2a3766; border-radius: 10px; padding:10px 12px; }
-    .provider { margin-left:auto; font-size:12px; color:var(--muted); }
-    .controls { display:flex; gap:10px; align-items:center; }
+    .tone { margin-top:8px; opacity:.7; font-size:12px; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; }
+    .chip { padding:6px 9px; border:1px solid #2a3766; border-radius:8px; background:#101735; }
     .pill { background:#0c1330; border:1px solid #26407a; padding:7px 10px; border-radius:999px; color:var(--muted); font-size:12px; }
-    .note { margin-top:10px; color:#aab4e4; font-size:13px; }
-    .error { color:#ff9aa4; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Cloud Speech Test (Top-5)</h1>
+    <h1>Cloud Speech Test (minimal)</h1>
 
     <div class="row">
       <label for="lang">Language:</label>
@@ -41,15 +40,13 @@
         <option value="es-ES">Español (España)</option>
       </select>
 
-      <div class="controls">
-        <span class="pill" title="Select which cloud to use">
-          Provider:
-          <select id="provider" style="background:transparent;border:none;color:var(--text);">
-            <option value="azure" selected>Azure (Top-5)</option>
-            <option value="openai">OpenAI (1-best)</option>
-          </select>
-        </span>
-      </div>
+      <span class="pill">
+        Provider:
+        <select id="provider" style="background:transparent;border:none;color:var(--text);">
+          <option value="azure" selected>Azure (Top-5)</option>
+          <option value="openai">OpenAI (1-best)</option>
+        </select>
+      </span>
     </div>
 
     <div class="status" id="status">Idle.</div>
@@ -63,78 +60,30 @@
       <button id="micBtn" class="mic" type="button" aria-pressed="false">
         🎙️ <span id="micLabel">Start Recording</span>
       </button>
-      <span class="provider" id="provInfo"></span>
-    </div>
-
-    <div class="note">
-      Tip: click once to start, again to stop. Short utterances (&lt;10s) work best.
+      <span class="pill" id="provInfo">Using: AZURE</span>
     </div>
   </div>
-    <script src="/js/pinyin-loader.js"></script>
-    <script>
+
+  <!-- Loader with homophone + tone helpers -->
+  <script src="/js/pinyin-loader.js"></script>
+
+  <script>
     const langSel = document.getElementById('lang');
     const providerSel = document.getElementById('provider');
     const statusEl = document.getElementById('status');
     const micBtn = document.getElementById('micBtn');
     const micLabel = document.getElementById('micLabel');
+    const provInfo = document.getElementById('provInfo');
     const resultsBox = document.getElementById('results');
     const listEl = document.getElementById('list');
-    const provInfo = document.getElementById('provInfo');
-  
-    let recording = false;
-    let MODE = null;        // 'wav' or 'media'
-    let mediaRecorder = null, chunks = [];
 
-    // --- helpers to detect a single Hanzi / single pinyin ---
-    function isSingleHanChar(s) {
-      return [...(s||'')].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
-    }
-    function normalizePinyinKey(s) {
-      const toneMap = {'ā':'a1','á':'a2','ǎ':'a3','à':'a4','ē':'e1','é':'e2','ě':'e3','è':'e4','ī':'i1','í':'i2','ǐ':'i3','ì':'i4','ō':'o1','ó':'o2','ǒ':'o3','ò':'o4','ū':'u1','ú':'u2','ǔ':'u3','ù':'u4','ǖ':'v1','ǘ':'v2','ǚ':'v3','ǜ':'v4','ü':'v'};
-      let t = (s||'').trim().toLowerCase();
-      t = t.replace(/[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]/g, m=>toneMap[m]||m);
-      if (!/^[a-z]+[1-5]?$/.test(t) || t.includes(' ') || t.length>6) return null;
-      return t; // "hao" or "hao3"
-    }
-  
-    // --- render homophones under your results list ---
-    function renderHomophones(zhAugment) {
-      if (!zhAugment || !Array.isArray(zhAugment.homophones) || zhAugment.homophones.length === 0) return;
-      const { mode, input, bases, homophones } = zhAugment;
-  
-      const box = document.createElement('div');
-      box.className = 'item';
-  
-      const head = document.createElement('div');
-      head.style.marginBottom = '6px';
-      head.style.opacity = '.85';
-      head.textContent = mode === 'singleChar'
-        ? `Homophones for ${input}${bases?.length?` [${bases.join(', ')}]`:''}:`
-        : `Characters for "${input}"${bases?.length?` [${bases.join(', ')}]`:''}:`;
-      box.appendChild(head);
-  
-      const chips = document.createElement('div');
-      chips.style.display = 'flex';
-      chips.style.flexWrap = 'wrap';
-      chips.style.gap = '8px';
-  
-      homophones.slice(0, 64).forEach(ch => {
-        const span = document.createElement('span');
-        span.style.padding = '6px 9px';
-        span.style.border = '1px solid #2a3766';
-        span.style.borderRadius = '8px';
-        span.style.background = '#101735';
-        span.textContent = ch;
-        chips.appendChild(span);
-      });
-  
-      box.appendChild(chips);
-      listEl.appendChild(box);
-    }
-      
+    let mediaRecorder = null;
+    let chunks = [];
+    let recording = false;
+
     function setStatus(msg, isError=false) {
       statusEl.textContent = msg;
-      statusEl.className = 'status' + (isError ? ' error' : '');
+      statusEl.style.color = isError ? '#ff9aa4' : 'var(--muted)';
     }
     function setRecording(on) {
       recording = on;
@@ -143,213 +92,152 @@
       micLabel.textContent = on ? 'Stop Recording' : 'Start Recording';
       provInfo.textContent = `Using: ${providerSel.value.toUpperCase()}`;
     }
+
     function renderCandidates(arr) {
-      const clean = Array.isArray(arr)
-        ? arr.map(s => (s || '').trim()).filter(Boolean).slice(0, 5)
-        : [];
-      listEl.innerHTML = '';
+      const items = (Array.isArray(arr) ? arr : []).filter(Boolean);
       resultsBox.hidden = false;
-      if (clean.length === 0) {
+      listEl.innerHTML = '';
+      if (items.length === 0) {
         const div = document.createElement('div');
         div.className = 'item';
-        div.textContent = 'No speech recognized. Try a slightly longer/clearer utterance.';
+        div.textContent = 'No speech recognized.';
         listEl.appendChild(div);
         return;
       }
-      clean.forEach((t, i) => {
+      items.forEach((t, i) => {
         const div = document.createElement('div');
         div.className = 'item';
         div.textContent = `${i+1}. ${t}`;
         listEl.appendChild(div);
       });
     }
-  
-    /* ---------- WAV recorder (Azure) ---------- */
-    const WAV = { ctx:null, stream:null, source:null, processor:null, buffers:[], sampleRate:16000, recording:false };
-    async function startWavRecording() {
-      WAV.stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-      WAV.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: WAV.sampleRate });
-      WAV.source = WAV.ctx.createMediaStreamSource(WAV.stream);
-      WAV.processor = WAV.ctx.createScriptProcessor(4096, 1, 1);
-      WAV.buffers = [];
-      WAV.processor.onaudioprocess = (e) => {
-        WAV.buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-      };
-      WAV.source.connect(WAV.processor);
-      WAV.processor.connect(WAV.ctx.destination);
-      WAV.recording = true;
-    }
-    function stopWavRecording() {
-      return new Promise(resolve => {
-        if (!WAV.recording) return resolve(null);
-        WAV.recording = false;
-        try { WAV.processor.disconnect(); } catch {}
-        try { WAV.source.disconnect(); } catch {}
-        try { WAV.stream.getTracks().forEach(t => t.stop()); } catch {}
-  
-        // merge Float32 buffers
-        const totalLen = WAV.buffers.reduce((a,c)=>a+c.length, 0);
-        const data = new Float32Array(totalLen);
-        let off = 0; for (const b of WAV.buffers) { data.set(b, off); off += b.length; }
-  
-        // Float32 -> Int16 PCM
-        const pcm = new Int16Array(data.length);
-        for (let i=0;i<data.length;i++) {
-          const s = Math.max(-1, Math.min(1, data[i]));
-          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-  
-        // Build WAV header
-        const numChannels = 1, bitsPerSample = 16, sampleRate = WAV.sampleRate;
-        const byteRate = sampleRate * numChannels * (bitsPerSample/8);
-        const blockAlign = numChannels * (bitsPerSample/8);
-        const dataSize = pcm.byteLength;
-  
-        const buf = new ArrayBuffer(44 + dataSize);
-        const dv = new DataView(buf);
-        let p = 0;
-        writeStr('RIFF'); u32(36 + dataSize); writeStr('WAVE'); writeStr('fmt '); u32(16);
-        u16(1); u16(numChannels); u32(sampleRate); u32(byteRate); u16(blockAlign); u16(bitsPerSample);
-        writeStr('data'); u32(dataSize);
-        new Uint8Array(buf, 44).set(new Uint8Array(pcm.buffer));
-  
-        function writeStr(s){ for (let i=0;i<s.length;i++) dv.setUint8(p++, s.charCodeAt(i)); }
-        function u16(v){ dv.setUint16(p, v, true); p+=2; }
-        function u32(v){ dv.setUint32(p, v, true); p+=4; }
-  
-        const blob = new Blob([buf], { type: 'audio/wav' });
-        resolve(blob);
+
+    function renderHomophones(zh) {
+      if (!zh || !Array.isArray(zh.homophones) || zh.homophones.length === 0) return;
+      const box = document.createElement('div');
+      box.className = 'item';
+
+      const head = document.createElement('div');
+      head.style.marginBottom = '6px';
+      head.style.opacity = '.85';
+      head.textContent = zh.mode === 'singleChar'
+        ? `Homophones for ${zh.input}${zh.bases?.length?` [${zh.bases.join(', ')}]`:''}:`
+        : `Characters for "${zh.input}"${zh.bases?.length?` [${zh.bases.join(', ')}]`:''}:`;
+      box.appendChild(head);
+
+      const chips = document.createElement('div');
+      chips.className = 'chips';
+      zh.homophones.slice(0, 64).forEach(ch => {
+        const span = document.createElement('span');
+        span.className = 'chip';
+        span.textContent = ch;
+        chips.appendChild(span);
       });
-    }
-  
-    /* ---------- MediaRecorder (OpenAI) ---------- */
-    async function startMediaRecording() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-      chunks = [];
-  
-      // Prefer WebM/Opus for OpenAI; fallback to OGG/Opus if needed
-      let mime = '';
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mime = 'audio/webm;codecs=opus';
-      } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-        mime = 'audio/ogg;codecs=opus';
-      } else {
-        mime = ''; // let browser decide
+      box.appendChild(chips);
+
+      if (zh.toneLabel) {
+        const tone = document.createElement('div');
+        tone.className = 'tone';
+        tone.textContent = `Detected tone: ${zh.toneLabel}`;
+        box.appendChild(tone);
       }
-  
+      listEl.appendChild(box);
+    }
+
+    async function startRecording() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+
+      // Prefer OGG/Opus → fallback to WebM/Opus → else default
+      let mime = '';
+      if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        mime = 'audio/ogg;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mime = 'audio/webm;codecs=opus';
+      }
+
       mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.onstart = () => setStatus('Listening…');
       mediaRecorder.start();
     }
-    function stopMediaRecording() {
+
+    function stopRecording() {
       return new Promise(resolve => {
         if (!mediaRecorder) return resolve(null);
         mediaRecorder.onstop = () => {
           const type = chunks[0]?.type || 'application/octet-stream';
           const blob = new Blob(chunks, { type });
-          // Stop tracks
-          try { mediaRecorder.stream.getTracks().forEach(t => t.stop()); } catch {}
           resolve(blob);
         };
         mediaRecorder.stop();
       });
     }
-  
-    /* ---------- Common upload ---------- */
+
     async function sendToServer(audioBlob) {
-      const ext =
-        audioBlob.type.includes('wav') ? 'wav' :
-        audioBlob.type.includes('webm') ? 'webm' :
-        audioBlob.type.includes('ogg') ? 'ogg' : 'bin';
-  
       const form = new FormData();
-      form.append('audio', audioBlob, `speech.${ext}`);
+      form.append('audio', audioBlob, audioBlob.type.includes('wav') ? 'speech.wav' : 'clip.ogg');
       form.append('language', langSel.value);
       form.append('provider', providerSel.value);
-      form.append('debug','1'); // uncomment for a single request if you want upstream diagnostics
-  
       const r = await fetch('/api/transcribe', { method: 'POST', body: form });
       const ct = r.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        const data = await r.json();
-        if (!r.ok) {
-          const msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error || data);
-          throw new Error(msg);
-        }
-        return data;
-      } else {
-        const text = await r.text();
-        throw new Error(text || `HTTP ${r.status}`);
-      }
+      if (!ct.includes('application/json')) throw new Error(await r.text() || `HTTP ${r.status}`);
+      const data = await r.json();
+      if (!r.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data));
+      return data;
     }
-  
+
+    // tiny detectors for fallback
+    const isSingleHan = s => [...(s||'')].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
+    const normalizePinyinKey = (s) => {
+      const toneMap = {'ā':'a1','á':'a2','ǎ':'a3','à':'a4','ē':'e1','é':'e2','ě':'e3','è':'e4','ī':'i1','í':'i2','ǐ':'i3','ì':'i4','ō':'o1','ó':'o2','ǒ':'o3','ò':'o4','ū':'u1','ú':'u2','ǔ':'u3','ù':'u4','ǖ':'v1','ǘ':'v2','ǚ':'v3','ǜ':'v4','ü':'v'};
+      let t = (s||'').trim().toLowerCase();
+      if (!t || t.includes(' ')) return null;
+      t = t.replace(/[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]/g, m=>toneMap[m]||m);
+      if (!/^[a-z]+[1-5]?$/.test(t) || t.length > 6) return null;
+      return t;
+    };
+
     micBtn.addEventListener('click', async () => {
       try {
         if (!recording) {
-          // Choose recorder by provider
-          if (providerSel.value === 'azure') {
-            MODE = 'wav';
-            await startWavRecording();
-          } else {
-            MODE = 'media';
-            await startMediaRecording();
-          }
+          await startRecording();
           setRecording(true);
-          setStatus('Listening…');
         } else {
           setStatus('Processing…');
-          let blob = null;
-          if (MODE === 'wav') {
-            blob = await stopWavRecording();
-          } else {
-            blob = await stopMediaRecording();
-          }
+          const blob = await stopRecording();
           setRecording(false);
           if (!blob) { setStatus('No audio captured.', true); return; }
-  
+
           const data = await sendToServer(blob);
-          console.log('API response:', data);
-  
           const candidates = Array.isArray(data.candidates) ? data.candidates : [];
           renderCandidates(candidates);
 
-          // 1) Server-provided homophones (render once if non-empty)
-          let homophonesRendered = false;
+          // Render server homophones if present and non-empty
+          let rendered = false;
           if (data.zhAugment && Array.isArray(data.zhAugment.homophones) && data.zhAugment.homophones.length > 0) {
             renderHomophones(data.zhAugment);
-            homophonesRendered = true;
+            rendered = true;
           }
-          
-          // 2) Client fallback — only if server gave nothing useful
-          if (!homophonesRendered) {
-            try {
-              const topRaw = (candidates[0] || '').trim();
-              const langPrimary = (langSel.value||'').split('-')[0];
-              if (langPrimary === 'zh' && topRaw) {
-                // Strip CJK punctuation like "。", "，" etc.
-                const top = [...topRaw].filter(ch => /\p{Script=Han}/u.test(ch) || /[a-zA-Zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü1-5]/.test(ch)).join('');
-                if (top) {
-                  // Case A: single Hanzi
-                  const onlyHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
-                  if (onlyHan && onlyHan.length === 1 && window.pinyinLoader?.homophonesFromHanzi) {
-                    const homos = await window.pinyinLoader.homophonesFromHanzi(onlyHan);
-                    if (homos && homos.length) renderHomophones({ mode:'singleChar', input: onlyHan, bases: null, homophones: homos });
-                  } else {
-                    // Case B: single pinyin syllable
-                    const key = normalizePinyinKey(top);
-                    if (key && window.pinyinLoader?.homophonesFromPinyin) {
-                      const homos = await window.pinyinLoader.homophonesFromPinyin(key);
-                      if (homos && homos.length) renderHomophones({ mode:'singlePinyin', input: topRaw, bases: [key.replace(/[1-5]$/,'')], homophones: homos });
-                    }
-                  }
-                }
+
+          // Minimal client fallback (only when Chinese selected and server gave none)
+          const langPrimary = (langSel.value||'').split('-')[0];
+          const top = (candidates[0] || '').trim();
+          if (!rendered && langPrimary === 'zh' && top && window.pinyinLoader) {
+            // strip punctuation like "。"
+            const onlyHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
+            if (onlyHan && onlyHan.length === 1 && window.pinyinLoader.homophonesFromHanziWithTone) {
+              const { homophones, toneLabel } = await window.pinyinLoader.homophonesFromHanziWithTone(onlyHan);
+              if (homophones && homophones.length) renderHomophones({ mode:'singleChar', input: onlyHan, bases: null, homophones, toneLabel });
+            } else if (window.pinyinLoader.homophonesFromPinyinWithTone) {
+              const key = normalizePinyinKey(top);
+              if (key) {
+                const { homophones, toneLabel } = await window.pinyinLoader.homophonesFromPinyinWithTone(key);
+                if (homophones && homophones.length) renderHomophones({ mode:'singlePinyin', input: top, bases: [key.replace(/[1-5]$/,'')], homophones, toneLabel });
               }
-            } catch (e) {
-              console.warn('client fallback failed:', e);
             }
           }
-          
-          if (data.debug) console.log('DEBUG upstream:', data);
+
           setStatus(`Done. Received ${candidates.length} result(s).`);
         }
       } catch (err) {
