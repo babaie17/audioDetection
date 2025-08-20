@@ -51,17 +51,13 @@ export default async function handler(request) {
       });
       const body = await safeBody(r);
 
-      if (debug && !r.ok) {
-        return json({ provider: 'openai', status: r.status, ok: r.ok, upstream: body, candidates: [] }, r.status);
-      }
       if (!r.ok) return json({ error: errString(body, 'OpenAI error'), candidates: [] }, r.status);
 
-      const text = (body?.text || '').trim();
-      let candidates = text ? [text] : [];
-      candidates = strictLanguageFilter(candidates, language);
+      // Normalize candidates (strip trailing punctuation if single token)
+      let candidates = normalizeCandidates([(body?.text || '').trim()]);
 
-      // NEW: zh homophone augmentation (single char or single pinyin)
-      const zh = await buildZhHomophones(request, candidates, language);
+      // zh homophones + tone (optional)
+      const zh = await buildZhHomophones(request.url, candidates, language);
 
       return json({ provider: 'openai', candidates, zhAugment: zh }, 200);
     }
@@ -85,7 +81,6 @@ export default async function handler(request) {
       'recognition/dictation/cognitiveservices/v1'
     ];
 
-    const attempts = [];
     let lastErr = null;
 
     for (const path of endpoints) {
@@ -102,28 +97,18 @@ export default async function handler(request) {
       });
 
       const body = await safeBody(r);
-
-      if (debug) attempts.push({ endpoint: path, status: r.status, ok: r.ok, body });
-
       if (!r.ok) { lastErr = errString(body, 'Azure error'); continue; }
 
-      // Extract candidates (NBest) then fallback to DisplayText
       let candidates = extractAzureCandidates(body)
         .map(s => (s || '').trim())
         .filter(Boolean)
         .slice(0, 5);
 
-      // Drop Latin-only when zh/ja/ko is selected
       candidates = strictLanguageFilter(candidates, language);
-
-      if (candidates.length === 0) {
-        const dt = (body?.DisplayText || body?.Display || '').toString().trim();
-        const fb = dt ? strictLanguageFilter([dt], language) : [];
-        if (fb.length > 0) candidates = fb;
-      }
+      candidates = normalizeCandidates(candidates); // <— strip trailing punctuation if single token
 
       if (candidates.length > 0) {
-        const zh = await buildZhHomophones(request, candidates, language);
+        const zh = await buildZhHomophones(request.url, candidates, language);
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
@@ -134,17 +119,6 @@ export default async function handler(request) {
       }
 
       lastErr = errString(body, 'No speech recognized');
-    }
-
-    if (debug) {
-      return json({
-        debug: true,
-        sent: { size, type, contentType },
-        triedEndpoints: endpoints,
-        attempts,
-        error: lastErr || 'No speech recognized',
-        candidates: []
-      }, 200);
     }
 
     return json({ provider: 'azure', error: lastErr || 'No speech recognized', candidates: [] }, 200);
@@ -158,42 +132,55 @@ export default async function handler(request) {
 // If language starts with zh and the top candidate is either:
 // - exactly one Han character -> look up its pinyin (ignoring tone) and return all homophones from /pinyin-index/<base>.json
 // - a single pinyin syllable (e.g., "hǎo"/"hao3"/"hao") -> return all chars for that base
-async function buildZhHomophones(request, candidates, bcp47) {
+// Adds toneLabel: "3", "2/4", or null.
+async function buildZhHomophones(baseUrl, candidates, bcp47) {
   try {
     const primary = (bcp47 || '').split('-')[0].toLowerCase();
     if (primary !== 'zh') return null;
 
     let top = (candidates && candidates[0]) ? candidates[0].trim() : '';
-    // Strip common CJK punctuation so "你。" counts as single-char
+    if (!top) return null;
+
+    // Strip non-Han from ends so "你。" counts as "你"
     const hanOnly = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
     if (hanOnly) top = hanOnly;
-    if (!top) return null;
 
     const isSingleHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
     const singlePinyin = detectSinglePinyin(top); // "hao", "hao3", "hǎo" -> normalized or null
 
-    // IMPORTANT: use the request URL as base
-    const baseUrl = request.url;
-
     if (isSingleHan) {
       const ch = [...top].find(c => /\p{Script=Han}/u.test(c));
-      const readings = await lookupHanziReadings(baseUrl, ch);    // <— changed arg
+      const readings = await lookupHanziReadings(baseUrl, ch); // [{sound,tone,pretty}]
       const bases = [...new Set(readings.map(r => (r.sound || '').toLowerCase()).filter(Boolean))];
-      if (bases.length === 0) return { mode: 'singleChar', input: ch, homophones: [] };
+      const tones = [...new Set(readings.map(r => r.tone).filter(Boolean))]; // e.g., [3] or [2,4]
+      const toneLabel = tones.length ? tones.join('/') : null;
 
       const homophonesSet = new Set();
       for (const b of bases) {
-        const shard = await loadPinyinShard(baseUrl, b);          // <— changed arg
+        const shard = await loadPinyinShard(baseUrl, b);
         for (const char of (shard[b] || [])) homophonesSet.add(char);
       }
-      return { mode: 'singleChar', input: ch, bases, homophones: Array.from(homophonesSet) };
+      return {
+        mode: 'singleChar',
+        input: ch,
+        bases,
+        homophones: Array.from(homophonesSet),
+        toneLabel
+      };
     }
 
     if (singlePinyin) {
       const baseKey = singlePinyin.replace(/[1-5]$/,'');
-      const shard = await loadPinyinShard(baseUrl, baseKey);      // <— changed arg
+      const shard = await loadPinyinShard(baseUrl, baseKey);
       const homophones = (shard[baseKey] || []).slice();
-      return { mode: 'singlePinyin', input: top, bases: [baseKey], homophones };
+      const toneLabel = /[1-5]$/.test(singlePinyin) ? singlePinyin.slice(-1) : null;
+      return {
+        mode: 'singlePinyin',
+        input: top,
+        bases: [baseKey],
+        homophones,
+        toneLabel
+      };
     }
 
     return null;
@@ -201,52 +188,46 @@ async function buildZhHomophones(request, candidates, bcp47) {
     return null;
   }
 }
+
 // Cache (module-scope) for performance across invocations
 let HANZI_MAP = null;              // { "好":[{sound:"hao",tone:3,pretty:"hǎo"}], ... }
+const SHARD_CACHE = new Map();     // "hao" -> { hao:[...], hao1:[...], ... }
 
 async function lookupHanziReadings(baseUrl, ch) {
-  try {
-    if (!HANZI_MAP) {
-      const url = new URL('/hanzi_to_pinyin.json', baseUrl).toString();
-      const r = await fetch(url);
-      if (!r.ok) {
-        // Leave a breadcrumb in the result when debug=1 (added below)
-        HANZI_MAP = { __probe__: { url, status: r.status } };
-      } else {
-        HANZI_MAP = await r.json();
-      }
-    }
-    if (HANZI_MAP.__probe__) return []; // file missing -> no readings
-    return HANZI_MAP[ch] || [];
-  } catch (e) {
-    HANZI_MAP = { __probe__: { error: String(e) } };
-    return [];
+  if (!HANZI_MAP) {
+    const url = new URL('/hanzi_to_pinyin.json', baseUrl).toString();
+    const r = await fetch(url);
+    if (!r.ok) return [];
+    HANZI_MAP = await r.json();
   }
+  return HANZI_MAP[ch] || [];
 }
-
-const SHARD_CACHE = new Map();  // "hao" -> { hao:[...], hao1:[...], ... }
 
 async function loadPinyinShard(baseUrl, base) {
   if (SHARD_CACHE.has(base)) return SHARD_CACHE.get(base);
   const url = new URL(`/pinyin-index/${base}.json`, baseUrl).toString();
-  try {
-    const r = await fetch(url);
-    if (!r.ok) {
-      const obj = { __probe__: { url, status: r.status } };
-      SHARD_CACHE.set(base, obj);
-      return obj;
-    }
-    const obj = await r.json();
-    SHARD_CACHE.set(base, obj);
-    return obj;
-  } catch (e) {
-    const obj = { __probe__: { url, error: String(e) } };
-    SHARD_CACHE.set(base, obj);
-    return obj;
-  }
+  const r = await fetch(url);
+  const obj = r.ok ? await r.json() : {};
+  SHARD_CACHE.set(base, obj);
+  return obj;
 }
 
 /* ======================= helpers ======================= */
+
+// Strip trailing punctuation if the string is a single token (no spaces)
+function stripTrailingPunctIfSingle(s) {
+  if (!s) return s;
+  const t = s.trim();
+  if (t.includes(' ')) return t;
+  return t.replace(/[\.。！？!?，,、；;：:…]+$/u, '');
+}
+
+// Apply normalization to a list of candidates
+function normalizeCandidates(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .map(stripTrailingPunctIfSingle)
+    .filter(Boolean);
+}
 
 // Detect a single pinyin syllable like "hao", "hǎo", "hao3"
 function detectSinglePinyin(s) {
@@ -332,7 +313,6 @@ function extractAzureCandidates(data) {
 
   const out = [];
   const fields = ['lexical', 'display', 'itn', 'maskedITN', 'transcript', 'NormalizedText', 'Display'];
-
   for (const item of nbest || []) {
     for (const f of fields) {
       const v = (item?.[f] || '').toString().trim();
@@ -341,5 +321,3 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
-
-
