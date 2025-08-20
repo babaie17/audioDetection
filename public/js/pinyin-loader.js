@@ -1,14 +1,22 @@
 // --- pinyin shard loader (client-side) ---
 console.log('pinyin-loader loaded');
 
-const shardCache = new Map(); // base syllable -> JSON object
+const shardCache = new Map();              // base syllable -> { base:[...], base1:[...], ... }
+let hanziMap = null;                       // { "你": [{sound:"ni", tone:3, pretty:"nǐ"}], ... }
+
+async function ensureHanziMap() {
+  if (hanziMap) return hanziMap;
+  const r = await fetch('/hanzi_to_pinyin.json', { cache: 'force-cache' });
+  hanziMap = r.ok ? await r.json() : {};
+  return hanziMap;
+}
 
 // key: "hao" or "hao3"; files live at /pinyin-index/hao.json
 async function loadHanziForPinyin(key) {
   const base = key.replace(/[1-5]$/, '');   // shard name without tone
+  if (!base) return [];
   if (!shardCache.has(base)) {
-    // fetch once; browser/CDN will cache aggressively
-    const resp = await fetch(`/pinyin-index/${base}.json`);
+    const resp = await fetch(`/pinyin-index/${base}.json`, { cache: 'force-cache' });
     const obj = resp.ok ? await resp.json() : {};
     shardCache.set(base, obj);
   }
@@ -18,7 +26,6 @@ async function loadHanziForPinyin(key) {
 
 // Helpers to normalize user/ASR inputs
 function toPinyinKey(s) {
-  // Accept "hǎo", "hao3", or "hao" -> return "hao3" or "hao"
   const toneMap = {
     'ā':'a1','á':'a2','ǎ':'a3','à':'a4',
     'ē':'e1','é':'e2','ě':'e3','è':'e4',
@@ -30,26 +37,33 @@ function toPinyinKey(s) {
   let t = (s||'').trim().toLowerCase();
   t = t.replace(/[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]/g, m => toneMap[m] || m);
   // keep "hao3" if present, else "hao"
-  return /^[a-z]+[1-5]$/.test(t) ? t : t.replace(/[^a-z]/g,'');
+  const withTone = /^[a-z]+[1-5]$/.test(t);
+  return withTone ? t : t.replace(/[^a-z]/g,'');
 }
 
-// Example usage:
-// 1) From a recognized single Hanzi → list homophones of its pinyin
-async function homophonesFromHanzi(ch, prettyPinyinNum /* e.g., 'hao3' from your map */) {
-  const key = toPinyinKey(prettyPinyinNum);
-  return await loadHanziForPinyin(key || '');
+// From a recognized single Hanzi → union of all homophones across its readings (tone ignored)
+async function homophonesFromHanzi(ch) {
+  if (!ch) return [];
+  await ensureHanziMap();
+  const readings = Array.isArray(hanziMap[ch]) ? hanziMap[ch] : [];
+  if (!readings.length) return [];
+  const bases = [...new Set(readings.map(r => (r.sound||'').toLowerCase()).filter(Boolean))];
+  const out = new Set();
+  for (const b of bases) {
+    const list = await loadHanziForPinyin(b);
+    for (const c of list) out.add(c);
+  }
+  return [...out];
 }
 
-// 2) From a recognized single pinyin syllable (e.g., "hǎo" or "hao3")
+// From a recognized single pinyin syllable (e.g., "hǎo" or "hao3")
 async function homophonesFromPinyin(syllable) {
   const key = toPinyinKey(syllable);
-  return await loadHanziForPinyin(key || '');
+  if (!key) return [];
+  return await loadHanziForPinyin(key);
 }
 
 window.pinyinLoader = {
   homophonesFromPinyin,
   homophonesFromHanzi
 };
-console.log('pinyin-loader loaded');
-
-
