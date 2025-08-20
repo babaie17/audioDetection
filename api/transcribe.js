@@ -163,7 +163,10 @@ async function buildZhHomophones(request, candidates, bcp47) {
     const primary = (bcp47 || '').split('-')[0].toLowerCase();
     if (primary !== 'zh') return null;
 
-    const top = (candidates && candidates[0]) ? candidates[0].trim() : '';
+    let top = (candidates && candidates[0]) ? candidates[0].trim() : '';
+    // Strip common CJK punctuation so "你。" counts as single-char
+    const hanOnly = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).join('');
+    if (hanOnly) top = hanOnly;
     if (!top) return null;
 
     const isSingleHan = [...top].filter(ch => /\p{Script=Han}/u.test(ch)).length === 1;
@@ -338,4 +341,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
