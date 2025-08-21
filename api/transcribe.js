@@ -1,9 +1,6 @@
 // api/transcribe.js
 export const config = { runtime: 'edge' };
 
-import { wordsToNumbers } from 'words-to-numbers';
-import { toWords } from 'number-to-words';
-
 export default async function handler(request) {
   try {
     // CORS (safe for same-origin too)
@@ -18,6 +15,7 @@ export default async function handler(request) {
     const file = form.get('audio'); // Blob from client
     const language = (form.get('language') || 'en-US').toString();
     const provider = (form.get('provider') || 'azure').toString().toLowerCase();
+    const debug = (form.get('debug') || '').toString() === '1';
 
     if (!file || typeof file.arrayBuffer !== 'function') {
       return json({ error: 'No audio uploaded', candidates: [] }, 400);
@@ -58,10 +56,9 @@ export default async function handler(request) {
       // Normalize candidates (strip trailing punctuation if single token)
       let candidates = normalizeCandidates([(body?.text || '').trim()]);
 
-      // zh homophones + tone
+      // zh homophones + tone; en homophones (via Node helper)
       const zh = await buildZhHomophones(request.url, candidates, language);
-      // en homophones (now uses words-to-numbers + number-to-words)
-      const en = await buildEnHomophones(candidates, request.url); // <-- pass request.url so helper can call /api/num-normalize
+      const en = await buildEnHomophones(candidates, request.url);
       return json({ provider: 'openai', candidates, zhAugment: zh, enHomophones: en }, 200);
     }
 
@@ -77,7 +74,7 @@ export default async function handler(request) {
     const isOgg  = blobType.includes('ogg');
 
     const contentType = isWav
-      ? 'audio/wav; codecs=audio/pcm; samplerate=16000' // explicit for Azure
+      ? 'audio/wav; codecs=audio/pcm; samplerate=16000' // explicit for WAV (mono 16 kHz)
       : isWebm
         ? 'audio/webm; codecs=opus'
         : isOgg
@@ -118,7 +115,7 @@ export default async function handler(request) {
 
       if (candidates.length > 0) {
         const zh = await buildZhHomophones(request.url, candidates, language);
-        const en = await buildEnHomophones(candidates, request.url); // <-- pass request.url so helper can call /api/num-normalize
+        const en = await buildEnHomophones(candidates, request.url);
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
@@ -225,8 +222,8 @@ async function loadPinyinShard(baseUrl, base) {
 
 /* ======================= helpers ======================= */
 
-// --- English homophones (Datamuse) + number word/digit augmentation via /api/num-normalize (Node) ---
-async function buildEnHomophones(candidates /* language not required anymore */, baseUrl) {
+// --- English homophones (Datamuse) + number word/digit augmentation via Node helper ---
+async function buildEnHomophones(candidates, baseUrl) {
   try {
     const top = (candidates && candidates[0] || '').trim();
     if (!top || /\s/.test(top)) return null; // single token only
@@ -385,5 +382,3 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
-
-
