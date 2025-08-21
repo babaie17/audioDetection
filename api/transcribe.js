@@ -58,7 +58,7 @@ export default async function handler(request) {
 
       // zh homophones + tone; en homophones (via Node helper)
       const zh = await buildZhHomophones(request.url, candidates, language);
-      const en = await buildEnHomophones(candidates, request.url);
+      const en = await buildEnHomophones(candidates, request.url, language);
       return json({ provider: 'openai', candidates, zhAugment: zh, enHomophones: en }, 200);
     }
 
@@ -115,7 +115,7 @@ export default async function handler(request) {
 
       if (candidates.length > 0) {
         const zh = await buildZhHomophones(request.url, candidates, language);
-        const en = await buildEnHomophones(candidates, request.url);
+        const en = await buildEnHomophones(candidates, request.url, language);
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
@@ -222,20 +222,21 @@ async function loadPinyinShard(baseUrl, base) {
 
 /* ======================= helpers ======================= */
 
-// --- English homophones (Datamuse) + number word/digit augmentation ---
-// Only runs if language is English.
+// English homophones (English only): number words <-> digits + Datamuse
 async function buildEnHomophones(candidates, baseUrl, bcp47) {
   try {
-    const top = (candidates && candidates[0] || '').trim();
+    let top = (candidates && candidates[0] || '').trim();
     if (!top || /\s/.test(top)) return null; // single token only
 
     const primary = (bcp47 || '').split('-')[0].toLowerCase();
-    if (primary !== 'en') {
-      // Not English -> no homophones, no number conversion
-      return null;
+    if (primary !== 'en') return null; // ONLY do this in English
+
+    // Trim trailing punctuation from single tokens (e.g., "Two." -> "Two")
+    if (!top.includes(' ')) {
+      top = top.replace(/[\.。！？!?…，,；;：:]+$/u, '');
     }
 
-    // Ask Node helper to normalize numbers both ways (digits <-> words)
+    // Ask Node helper to normalize numbers both ways
     const normURL = new URL(`/api/num-normalize?text=${encodeURIComponent(top)}`, baseUrl).toString();
     let digitForm = null, wordForm = null;
     try {
@@ -250,9 +251,9 @@ async function buildEnHomophones(candidates, baseUrl, bcp47) {
     // Decide which word to query at Datamuse
     let queryWord = null;
     if (wordForm) {
-      queryWord = wordForm;
+      queryWord = wordForm;                   // if number detected, query on the word form
     } else if (/^[a-z-]+$/i.test(top)) {
-      queryWord = top.toLowerCase();
+      queryWord = top.toLowerCase();          // otherwise, plain ASCII word
     }
 
     // Fetch homophones from Datamuse
@@ -389,4 +390,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
