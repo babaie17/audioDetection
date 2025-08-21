@@ -217,26 +217,64 @@ async function loadPinyinShard(baseUrl, base) {
 /* ======================= helpers ======================= */
 
 // --- English homophones via Datamuse ---
+// --- English homophones via Datamuse + number word/digit augmentation ---
 async function buildEnHomophones(candidates, bcp47) {
   try {
     const primary = (bcp47 || '').split('-')[0].toLowerCase();
     if (primary !== 'en') return null;
 
     const top = (candidates && candidates[0] || '').trim();
-    // single token only (no spaces, hyphens or apostrophes for this simple pass)
-    if (!top || /\s/.test(top)) return null;
+    if (!top || /\s/.test(top)) return null; // single token only
 
-    const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(top)}&max=20`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
-    if (!r.ok) return null;
+    // Normalize to a "word" for querying Datamuse
+    let queryWord = top;
+    let digitForm = null;
+    let wordForm = null;
 
-    const items = await r.json();
-    const homos = (Array.isArray(items) ? items : [])
-      .map(x => (x && x.word ? x.word : '').trim())
-      .filter(w => w && w.toLowerCase() !== top.toLowerCase());
+    if (/^\d+$/.test(top)) {
+      // top is digits -> convert to word
+      const n = parseInt(top, 10);
+      wordForm = intToEnglishWord(n);     // e.g., 2 -> "two" (null if out of range)
+      queryWord = wordForm || top;        // prefer word for Datamuse
+      digitForm = String(n);              // normalized digit
+    } else {
+      // top is a word -> see if it's a number word
+      const n = englishWordToInt(top);    // e.g., "two" -> 2
+      if (Number.isInteger(n)) {
+        wordForm = normalizeNumberWord(top); // normalized ("two", "twenty-five", etc.)
+        digitForm = String(n);
+        queryWord = wordForm;                // query the number word, not the digits
+      }
+    }
+
+    // Call Datamuse on the word form when available
+    let datamuse = [];
+    if (queryWord && /^[a-z-]+$/i.test(queryWord)) {
+      const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(queryWord)}&max=30`;
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (r.ok) {
+        const items = await r.json();
+        datamuse = (Array.isArray(items) ? items : [])
+          .map(x => (x && x.word ? x.word : '').trim())
+          .filter(Boolean);
+      }
+    }
+
+    // Union: datamuse homophones + digit/word forms
+    const set = new Set();
+    for (const w of datamuse) set.add(w);
+    if (wordForm) set.add(wordForm);
+    if (digitForm) set.add(digitForm);
+
+    // Don't include the top token itself twice
+    set.delete(top.toLowerCase() === top ? top : top.toLowerCase());
+
+    const homos = Array.from(set)
+      .filter(Boolean)
+      .filter(w => w.toLowerCase() !== top.toLowerCase());
 
     if (homos.length === 0) return null;
-    return { input: top, homophones: [...new Set(homos)].slice(0, 20) };
+    return { input: top, homophones: homos.slice(0, 30) };
   } catch {
     return null;
   }
@@ -255,6 +293,82 @@ function normalizeCandidates(arr) {
   return (Array.isArray(arr) ? arr : [])
     .map(stripTrailingPunctIfSingle)
     .filter(Boolean);
+}
+
+// Normalize common number words
+function normalizeNumberWord(s) {
+  return (s || '').trim().toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*-\s*/g, '-');
+}
+
+const SMALLS = {
+  'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,
+  'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19
+};
+const TENS = {
+  'twenty':20,'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90
+};
+
+// "twenty-five" -> 25, "two hundred three" -> 203 (0..9999). Returns NaN if not a number word.
+function englishWordToInt(s) {
+  if (!s) return NaN;
+  s = normalizeNumberWord(s);
+
+  // hyphenated simple case (twenty-five)
+  if (s.includes('-')) {
+    const [t, u] = s.split('-');
+    if (TENS[t] && SMALLS[u] !== undefined) return TENS[t] + SMALLS[u];
+  }
+
+  // tokens
+  const parts = s.split(' ');
+  let total = 0, current = 0;
+  for (const p of parts) {
+    if (SMALLS[p] !== undefined) {
+      current += SMALLS[p];
+    } else if (TENS[p] !== undefined) {
+      current += TENS[p];
+    } else if (p === 'hundred') {
+      if (current === 0) return NaN;
+      current *= 100;
+    } else if (p === 'thousand') {
+      if (current === 0) return NaN;
+      total += current * 1000;
+      current = 0;
+    } else if (p === 'and') {
+      // ignore British "and"
+      continue;
+    } else {
+      return NaN; // unknown token
+    }
+  }
+  total += current;
+  if (!Number.isInteger(total)) return NaN;
+  if (total < 0 || total > 9999) return NaN;
+  return total;
+}
+
+function intToEnglishWord(n) {
+  if (!Number.isInteger(n) || n < 0 || n > 9999) return null;
+  if (n < 20) return Object.keys(SMALLS).find(k => SMALLS[k] === n);
+  if (n < 100) {
+    const t = Math.floor(n/10)*10;
+    const u = n % 10;
+    const tWord = Object.keys(TENS).find(k => TENS[k] === t);
+    return u ? `${tWord}-${Object.keys(SMALLS).find(k => SMALLS[k] === u)}` : tWord;
+  }
+  if (n < 1000) {
+    const h = Math.floor(n/100);
+    const r = n % 100;
+    const hWord = Object.keys(SMALLS).find(k => SMALLS[k] === h);
+    return r ? `${hWord} hundred ${intToEnglishWord(r)}` : `${hWord} hundred`;
+  }
+  // 1000..9999
+  const th = Math.floor(n/1000);
+  const r = n % 1000;
+  const thWord = Object.keys(SMALLS).find(k => SMALLS[k] === th);
+  return r ? `${thWord} thousand ${intToEnglishWord(r)}` : `${thWord} thousand`;
 }
 
 // Detect a single pinyin syllable like "hao", "hǎo", "hao3"
@@ -349,4 +463,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
