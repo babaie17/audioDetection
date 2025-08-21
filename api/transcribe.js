@@ -1,5 +1,9 @@
 // api/transcribe.js
-export const config = { runtime: 'edge' };
+// Switch this route to Node.js runtime so we can use npm packages
+export const config = { runtime: 'nodejs' };
+
+import { wordsToNumbers } from 'words-to-numbers';
+import { toWords } from 'number-to-words';
 
 export default async function handler(request) {
   try {
@@ -15,7 +19,6 @@ export default async function handler(request) {
     const file = form.get('audio'); // Blob from client
     const language = (form.get('language') || 'en-US').toString();
     const provider = (form.get('provider') || 'azure').toString().toLowerCase();
-    const debug = (form.get('debug') || '').toString() === '1';
 
     if (!file || typeof file.arrayBuffer !== 'function') {
       return json({ error: 'No audio uploaded', candidates: [] }, 400);
@@ -56,9 +59,11 @@ export default async function handler(request) {
       // Normalize candidates (strip trailing punctuation if single token)
       let candidates = normalizeCandidates([(body?.text || '').trim()]);
 
-      // zh homophones, en homophones + tone (optional)
+      // zh homophones + tone
       const zh = await buildZhHomophones(request.url, candidates, language);
+      // en homophones (now uses words-to-numbers + number-to-words)
       const en = await buildEnHomophones(candidates, language);
+
       return json({ provider: 'openai', candidates, zhAugment: zh, enHomophones: en }, 200);
     }
 
@@ -69,11 +74,17 @@ export default async function handler(request) {
 
     // Prefer using the actual client MIME; normalize to common Azure-accepted types
     const blobType = (file.type || '').toLowerCase();
-    const contentType =
-      blobType.includes('ogg')  ? 'audio/ogg; codecs=opus' :
-      blobType.includes('webm') ? 'audio/webm; codecs=opus' :
-      blobType.includes('wav')  ? 'audio/wav' :
-      'application/octet-stream';
+    const isWav  = blobType.includes('wav');
+    const isWebm = blobType.includes('webm');
+    const isOgg  = blobType.includes('ogg');
+
+    const contentType = isWav
+      ? 'audio/wav; codecs=audio/pcm; samplerate=16000' // explicit for Azure
+      : isWebm
+        ? 'audio/webm; codecs=opus'
+        : isOgg
+          ? 'audio/ogg; codecs=opus'
+          : 'application/octet-stream';
 
     const endpoints = [
       'recognition/conversation/cognitiveservices/v1',
@@ -84,7 +95,7 @@ export default async function handler(request) {
     let lastErr = null;
 
     for (const path of endpoints) {
-      const url = `https://${azRegion}.stt.speech.microsoft.com/speech/${path}?language=${encodeURIComponent(language)}&format=detailed`;
+      const url = `https://${azRegion}.stt.speech.microsoft.com/speech/${path}?language=${encodeURIComponent(language)}&format=detailed&profanity=raw`;
 
       const r = await fetch(url, {
         method: 'POST',
@@ -105,7 +116,7 @@ export default async function handler(request) {
         .slice(0, 5);
 
       candidates = strictLanguageFilter(candidates, language);
-      candidates = normalizeCandidates(candidates); // <— strip trailing punctuation if single token
+      candidates = normalizeCandidates(candidates); // strip trailing punctuation if single token
 
       if (candidates.length > 0) {
         const zh = await buildZhHomophones(request.url, candidates, language);
@@ -216,40 +227,41 @@ async function loadPinyinShard(baseUrl, base) {
 
 /* ======================= helpers ======================= */
 
-// --- English homophones via Datamuse ---
-// --- English homophones via Datamuse + number word/digit augmentation ---
+// --- English homophones (Datamuse) + number word/digit augmentation via libs ---
 async function buildEnHomophones(candidates, bcp47) {
   try {
-    const primary = (bcp47 || '').split('-')[0].toLowerCase();
-    if (primary !== 'en') return null;
-
     const top = (candidates && candidates[0] || '').trim();
     if (!top || /\s/.test(top)) return null; // single token only
 
-    // Normalize to a "word" for querying Datamuse
-    let queryWord = top;
-    let digitForm = null;
-    let wordForm = null;
+    // Decide “word form” for Datamuse, and whether we should add digit/word variants
+    let queryWord = null;   // word to query at Datamuse
+    let digitForm = null;   // "144"
+    let wordForm  = null;   // "one hundred forty-four"
 
     if (/^\d+$/.test(top)) {
-      // top is digits -> convert to word
+      // top is digits -> make a normalized word
       const n = parseInt(top, 10);
-      wordForm = intToEnglishWord(n);     // e.g., 2 -> "two" (null if out of range)
-      queryWord = wordForm || top;        // prefer word for Datamuse
-      digitForm = String(n);              // normalized digit
+      digitForm = String(n);
+      try { wordForm = toWords(n).replace(/,/g, ''); } catch { wordForm = null; }
+      if (wordForm) queryWord = wordForm;
     } else {
-      // top is a word -> see if it's a number word
-      const n = englishWordToInt(top);    // e.g., "two" -> 2
-      if (Number.isInteger(n)) {
-        wordForm = normalizeNumberWord(top); // normalized ("two", "twenty-five", etc.)
-        digitForm = String(n);
-        queryWord = wordForm;                // query the number word, not the digits
+      // top is a word -> try to convert to number using words-to-numbers
+      // wordsToNumbers returns a number or the original string depending on options;
+      // we force it to return a number with {fuzzy:true} then compare.
+      const converted = wordsToNumbers(top, { fuzzy: true });
+      if (typeof converted === 'number' || /^\d+$/.test(String(converted))) {
+        digitForm = String(converted);
+        try { wordForm = toWords(converted).replace(/,/g, ''); } catch { wordForm = null; }
+        queryWord = wordForm || top;
+      } else if (/^[a-z-]+$/i.test(top)) {
+        // Non-number single word
+        queryWord = top;
       }
     }
 
-    // Call Datamuse on the word form when available
+    // Fetch homophones from Datamuse when we have a word form
     let datamuse = [];
-    if (queryWord && /^[a-z-]+$/i.test(queryWord)) {
+    if (queryWord) {
       const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(queryWord)}&max=30`;
       const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (r.ok) {
@@ -260,19 +272,15 @@ async function buildEnHomophones(candidates, bcp47) {
       }
     }
 
-    // Union: datamuse homophones + digit/word forms
-    const set = new Set();
-    for (const w of datamuse) set.add(w);
-    if (wordForm) set.add(wordForm);
-    if (digitForm) set.add(digitForm);
+    // Union: datamuse + digit/word variants (if applicable)
+    const set = new Set(datamuse.map(w => w.toLowerCase()));
+    if (wordForm)  set.add(wordForm.toLowerCase());
+    if (digitForm) set.add(digitForm.toLowerCase());
 
-    // Don't include the top token itself twice
-    set.delete(top.toLowerCase() === top ? top : top.toLowerCase());
+    // Don’t re-include the top token
+    set.delete(top.toLowerCase());
 
-    const homos = Array.from(set)
-      .filter(Boolean)
-      .filter(w => w.toLowerCase() !== top.toLowerCase());
-
+    const homos = Array.from(set);
     if (homos.length === 0) return null;
     return { input: top, homophones: homos.slice(0, 30) };
   } catch {
@@ -293,82 +301,6 @@ function normalizeCandidates(arr) {
   return (Array.isArray(arr) ? arr : [])
     .map(stripTrailingPunctIfSingle)
     .filter(Boolean);
-}
-
-// Normalize common number words
-function normalizeNumberWord(s) {
-  return (s || '').trim().toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/\s*-\s*/g, '-');
-}
-
-const SMALLS = {
-  'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,
-  'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19
-};
-const TENS = {
-  'twenty':20,'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90
-};
-
-// "twenty-five" -> 25, "two hundred three" -> 203 (0..9999). Returns NaN if not a number word.
-function englishWordToInt(s) {
-  if (!s) return NaN;
-  s = normalizeNumberWord(s);
-
-  // hyphenated simple case (twenty-five)
-  if (s.includes('-')) {
-    const [t, u] = s.split('-');
-    if (TENS[t] && SMALLS[u] !== undefined) return TENS[t] + SMALLS[u];
-  }
-
-  // tokens
-  const parts = s.split(' ');
-  let total = 0, current = 0;
-  for (const p of parts) {
-    if (SMALLS[p] !== undefined) {
-      current += SMALLS[p];
-    } else if (TENS[p] !== undefined) {
-      current += TENS[p];
-    } else if (p === 'hundred') {
-      if (current === 0) return NaN;
-      current *= 100;
-    } else if (p === 'thousand') {
-      if (current === 0) return NaN;
-      total += current * 1000;
-      current = 0;
-    } else if (p === 'and') {
-      // ignore British "and"
-      continue;
-    } else {
-      return NaN; // unknown token
-    }
-  }
-  total += current;
-  if (!Number.isInteger(total)) return NaN;
-  if (total < 0 || total > 9999) return NaN;
-  return total;
-}
-
-function intToEnglishWord(n) {
-  if (!Number.isInteger(n) || n < 0 || n > 9999) return null;
-  if (n < 20) return Object.keys(SMALLS).find(k => SMALLS[k] === n);
-  if (n < 100) {
-    const t = Math.floor(n/10)*10;
-    const u = n % 10;
-    const tWord = Object.keys(TENS).find(k => TENS[k] === t);
-    return u ? `${tWord}-${Object.keys(SMALLS).find(k => SMALLS[k] === u)}` : tWord;
-  }
-  if (n < 1000) {
-    const h = Math.floor(n/100);
-    const r = n % 100;
-    const hWord = Object.keys(SMALLS).find(k => SMALLS[k] === h);
-    return r ? `${hWord} hundred ${intToEnglishWord(r)}` : `${hWord} hundred`;
-  }
-  // 1000..9999
-  const th = Math.floor(n/1000);
-  const r = n % 1000;
-  const thWord = Object.keys(SMALLS).find(k => SMALLS[k] === th);
-  return r ? `${thWord} thousand ${intToEnglishWord(r)}` : `${thWord} thousand`;
 }
 
 // Detect a single pinyin syllable like "hao", "hǎo", "hao3"
@@ -463,5 +395,3 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
-
-
