@@ -1,6 +1,5 @@
 // api/transcribe.js
-// Switch this route to Node.js runtime so we can use npm packages
-export const config = { runtime: 'nodejs' };
+export const config = { runtime: 'edge' };
 
 import { wordsToNumbers } from 'words-to-numbers';
 import { toWords } from 'number-to-words';
@@ -386,4 +385,5 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
 
