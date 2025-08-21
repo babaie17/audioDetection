@@ -1,16 +1,27 @@
 // api/num-normalize.js
 export const config = { runtime: 'nodejs' };
 
-import { wordsToNumbers } from 'words-to-numbers';
-import { toWords } from 'number-to-words';
+// Both deps are CommonJS; default-import and then pull the functions safely.
+import wtnMod from 'words-to-numbers';
+import ntwMod from 'number-to-words';
 
-// Remove leading/trailing quotes and trailing sentence punctuation
+const wordsToNumbers = typeof wtnMod === 'function' ? wtnMod : wtnMod?.wordsToNumbers;
+const toWords        = typeof ntwMod === 'function' ? ntwMod : ntwMod?.toWords;
+
+function assertDeps() {
+  if (typeof wordsToNumbers !== 'function') {
+    throw new Error('words-to-numbers import failed');
+  }
+  if (typeof toWords !== 'function') {
+    throw new Error('number-to-words import failed');
+  }
+}
+
+// Remove leading/trailing quotes and a single trailing sentence/clause punctuation
 function stripEnds(s) {
   return (s || '')
     .trim()
-    // drop surrounding quotes/backticks
     .replace(/^["'`]+|["'`]+$/g, '')
-    // drop ONE trailing sentence/clause ender if present
     .replace(/[\.。！？!?…，,；;：:]+$/u, '')
     .trim();
 }
@@ -19,18 +30,20 @@ function stripEnds(s) {
 function normalizeForWords(s) {
   return stripEnds(s)
     .toLowerCase()
-    .replace(/[,]+/g, '')       // commas inside words
+    .replace(/[,]+/g, '')       // remove commas
     .replace(/\s*-\s*/g, '-')   // tidy hyphens
     .replace(/\s+/g, ' ');      // collapse spaces
 }
 
 export default async function handler(req, res) {
   try {
+    assertDeps();
+
     const origin = `http://${req.headers.host || 'localhost'}`;
     const url = new URL(req.url || '/', origin);
 
     const raw0 = (url.searchParams.get('text') || '');
-    const raw = stripEnds(raw0);
+    const raw  = stripEnds(raw0);
 
     let digitForm = null;
     let wordForm  = null;
@@ -40,7 +53,7 @@ export default async function handler(req, res) {
       return res.status(200).send(JSON.stringify({ digitForm, wordForm }));
     }
 
-    // Case A: already digits (handle "144." cleaned to "144")
+    // Case A: already digits (handles "144." → "144" via stripEnds)
     if (/^\d+$/.test(raw)) {
       const n = parseInt(raw, 10);
       digitForm = String(n);
@@ -51,7 +64,6 @@ export default async function handler(req, res) {
 
     // Case B: words → digits (tolerant)
     const text = normalizeForWords(raw);
-    // wordsToNumbers may return a number or the original string depending on content/options.
     const converted = wordsToNumbers(text, { fuzzy: true });
 
     const maybeNum =
