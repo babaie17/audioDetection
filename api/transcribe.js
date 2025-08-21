@@ -222,13 +222,20 @@ async function loadPinyinShard(baseUrl, base) {
 
 /* ======================= helpers ======================= */
 
-// --- English homophones (Datamuse) + number word/digit augmentation via Node helper ---
-async function buildEnHomophones(candidates, baseUrl) {
+// --- English homophones (Datamuse) + number word/digit augmentation ---
+// Only runs if language is English.
+async function buildEnHomophones(candidates, baseUrl, bcp47) {
   try {
     const top = (candidates && candidates[0] || '').trim();
     if (!top || /\s/.test(top)) return null; // single token only
 
-    // Ask our Node helper to normalize numbers both ways
+    const primary = (bcp47 || '').split('-')[0].toLowerCase();
+    if (primary !== 'en') {
+      // Not English -> no homophones, no number conversion
+      return null;
+    }
+
+    // Ask Node helper to normalize numbers both ways (digits <-> words)
     const normURL = new URL(`/api/num-normalize?text=${encodeURIComponent(top)}`, baseUrl).toString();
     let digitForm = null, wordForm = null;
     try {
@@ -243,12 +250,12 @@ async function buildEnHomophones(candidates, baseUrl) {
     // Decide which word to query at Datamuse
     let queryWord = null;
     if (wordForm) {
-      queryWord = wordForm;                   // for "144" or "two"
+      queryWord = wordForm;
     } else if (/^[a-z-]+$/i.test(top)) {
-      queryWord = top;                        // non-number single word
+      queryWord = top.toLowerCase();
     }
 
-    // Fetch homophones from Datamuse (free, no key)
+    // Fetch homophones from Datamuse
     let datamuse = [];
     if (queryWord) {
       const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(queryWord)}&max=30`;
@@ -382,3 +389,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
