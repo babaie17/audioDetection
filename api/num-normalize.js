@@ -1,21 +1,28 @@
 // api/num-normalize.js
-export const config = { runtime: 'nodejs' };
+// Explicit Node runtime so npm packages are allowed
+export const config = { runtime: 'nodejs18.x' };
 
-import { wordsToNumbers } from 'words-to-numbers';
-import { toWords } from 'number-to-words';
+// NOTE: use dynamic imports so this works regardless of package.json "type"
+async function loadLibs() {
+  const { wordsToNumbers } = await import('words-to-numbers');
+  const { toWords } = await import('number-to-words');
+  return { wordsToNumbers, toWords };
+}
 
 function normalizeForWords(s) {
   return (s || '')
     .trim()
     .toLowerCase()
-    .replace(/[,]+/g, '')          // remove commas
-    .replace(/\s*-\s*/g, '-')      // normalize hyphens
-    .replace(/\s+/g, ' ');         // collapse spaces
+    .replace(/[,]+/g, '')       // remove commas
+    .replace(/\s*-\s*/g, '-')   // normalize hyphens
+    .replace(/\s+/g, ' ');      // collapse spaces
 }
 
 export default async function handler(req, res) {
   try {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    // Build absolute URL for query parsing
+    const origin = `http://${req.headers.host || 'localhost'}`;
+    const url = new URL(req.url || '/', origin);
     const raw = (url.searchParams.get('text') || '').trim();
 
     let digitForm = null;
@@ -26,7 +33,9 @@ export default async function handler(req, res) {
       return res.status(200).send(JSON.stringify({ digitForm, wordForm }));
     }
 
-    // If it's already all digits, just produce the word form.
+    const { wordsToNumbers, toWords } = await loadLibs();
+
+    // Case 1: already digits
     if (/^\d+$/.test(raw)) {
       const n = parseInt(raw, 10);
       digitForm = String(n);
@@ -35,12 +44,10 @@ export default async function handler(req, res) {
       return res.status(200).send(JSON.stringify({ digitForm, wordForm }));
     }
 
-    // Otherwise, try to interpret as words (case/spacing/punctuation tolerant).
+    // Case 2: words → digits (fuzzy)
     const text = normalizeForWords(raw);
-    // wordsToNumbers can return a number OR leave the string as-is; use fuzzy to be lenient.
     const converted = wordsToNumbers(text, { fuzzy: true });
 
-    // If it's a number (or a numeric-looking string), fill both forms.
     const maybeNum =
       (typeof converted === 'number' && Number.isFinite(converted))
         ? converted
@@ -54,6 +61,7 @@ export default async function handler(req, res) {
     res.setHeader('content-type', 'application/json');
     return res.status(200).send(JSON.stringify({ digitForm, wordForm }));
   } catch (err) {
+    // Return JSON instead of crashing
     res.setHeader('content-type', 'application/json');
     return res.status(200).send(JSON.stringify({
       digitForm: null,
