@@ -62,8 +62,7 @@ export default async function handler(request) {
       // zh homophones + tone
       const zh = await buildZhHomophones(request.url, candidates, language);
       // en homophones (now uses words-to-numbers + number-to-words)
-      const en = await buildEnHomophones(candidates, language);
-
+      const en = await buildEnHomophones(candidates, request.url); // <-- pass request.url so helper can call /api/num-normalize
       return json({ provider: 'openai', candidates, zhAugment: zh, enHomophones: en }, 200);
     }
 
@@ -120,7 +119,7 @@ export default async function handler(request) {
 
       if (candidates.length > 0) {
         const zh = await buildZhHomophones(request.url, candidates, language);
-        const en = await buildEnHomophones(candidates, language);
+        const en = await buildEnHomophones(candidates, request.url); // <-- pass request.url so helper can call /api/num-normalize
         return json({
           provider: 'azure',
           endpoint: path.split('/')[1],
@@ -227,39 +226,33 @@ async function loadPinyinShard(baseUrl, base) {
 
 /* ======================= helpers ======================= */
 
-// --- English homophones (Datamuse) + number word/digit augmentation via libs ---
-async function buildEnHomophones(candidates, bcp47) {
+// --- English homophones (Datamuse) + number word/digit augmentation via /api/num-normalize (Node) ---
+async function buildEnHomophones(candidates /* language not required anymore */, baseUrl) {
   try {
     const top = (candidates && candidates[0] || '').trim();
     if (!top || /\s/.test(top)) return null; // single token only
 
-    // Decide “word form” for Datamuse, and whether we should add digit/word variants
-    let queryWord = null;   // word to query at Datamuse
-    let digitForm = null;   // "144"
-    let wordForm  = null;   // "one hundred forty-four"
-
-    if (/^\d+$/.test(top)) {
-      // top is digits -> make a normalized word
-      const n = parseInt(top, 10);
-      digitForm = String(n);
-      try { wordForm = toWords(n).replace(/,/g, ''); } catch { wordForm = null; }
-      if (wordForm) queryWord = wordForm;
-    } else {
-      // top is a word -> try to convert to number using words-to-numbers
-      // wordsToNumbers returns a number or the original string depending on options;
-      // we force it to return a number with {fuzzy:true} then compare.
-      const converted = wordsToNumbers(top, { fuzzy: true });
-      if (typeof converted === 'number' || /^\d+$/.test(String(converted))) {
-        digitForm = String(converted);
-        try { wordForm = toWords(converted).replace(/,/g, ''); } catch { wordForm = null; }
-        queryWord = wordForm || top;
-      } else if (/^[a-z-]+$/i.test(top)) {
-        // Non-number single word
-        queryWord = top;
+    // Ask our Node helper to normalize numbers both ways
+    const normURL = new URL(`/api/num-normalize?text=${encodeURIComponent(top)}`, baseUrl).toString();
+    let digitForm = null, wordForm = null;
+    try {
+      const r = await fetch(normURL, { headers: { 'accept': 'application/json' } });
+      if (r.ok) {
+        const j = await r.json();
+        digitForm = j?.digitForm || null;
+        wordForm  = j?.wordForm || null;
       }
+    } catch {}
+
+    // Decide which word to query at Datamuse
+    let queryWord = null;
+    if (wordForm) {
+      queryWord = wordForm;                   // for "144" or "two"
+    } else if (/^[a-z-]+$/i.test(top)) {
+      queryWord = top;                        // non-number single word
     }
 
-    // Fetch homophones from Datamuse when we have a word form
+    // Fetch homophones from Datamuse (free, no key)
     let datamuse = [];
     if (queryWord) {
       const url = `https://api.datamuse.com/words?rel_hom=${encodeURIComponent(queryWord)}&max=30`;
@@ -272,12 +265,10 @@ async function buildEnHomophones(candidates, bcp47) {
       }
     }
 
-    // Union: datamuse + digit/word variants (if applicable)
+    // Union datamuse + digit/word forms, excluding the top token itself
     const set = new Set(datamuse.map(w => w.toLowerCase()));
     if (wordForm)  set.add(wordForm.toLowerCase());
     if (digitForm) set.add(digitForm.toLowerCase());
-
-    // Don’t re-include the top token
     set.delete(top.toLowerCase());
 
     const homos = Array.from(set);
@@ -395,3 +386,4 @@ function extractAzureCandidates(data) {
   }
   return out;
 }
+
